@@ -1,0 +1,57 @@
+{
+  "database": {
+    "server": "(localdb)\\\\MSSQLLocalDB",
+    "database": "Testsanitization",
+    "auth_type": "windows",
+    "timeout": 60,
+    "batch_size": 5000,
+    "max_retries": 5,
+    "retry_delay": 1.0,
+    "pool_size": 10,
+    "environment": "dev"
+  },
+  "logging": {
+    "level": "INFO",
+    "handlers": [
+      {
+        "type": "console",
+        "format_json": false
+      },
+      {
+        "type": "file",
+        "file_path": "logs/production_sanitization.log",
+        "max_bytes": 104857600,
+        "backup_count": 30,
+        "rotation_interval": "daily",
+        "format_json": true
+      }
+    ],
+    "pii_redaction": {
+      "enabled": true,
+      "redact_emails": true,
+      "redact_phones": true,
+      "redact_ssn": true,
+      "redact_credit_cards": true
+    },
+    "include_correlation_id": true
+  },
+  "ai": {
+    "enabled": true,
+    "api_url": "https://models.github.ai",
+    "api_key_env_var": "GITHUB_COPILOT_TOKEN",
+    "model": "gpt-4o",
+    "timeout_seconds": 60,
+    "max_retries": 3,
+    "retry_backoff_factor": 1.0,
+    "cache_enabled": true,
+    "cache_ttl_hours": 24,
+    "max_tables_per_request": 50,
+    "max_schema_size_chars": 100000
+  },
+  "pii_columns": [],
+  "dry_run": true,
+  "validate_before": true,
+  "validate_after": true,
+  "fail_fast": false,
+  "_comment": "Run AI detection first to populate pii_columns. Change dry_run to false only after validation."
+}

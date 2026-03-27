@@ -1,0 +1,33 @@
+# Database Sanitization Framework - Requirements
+# Python 3.10+ required
+
+# Core dependencies
+pyodbc==5.0.1                   # SQL Server ODBC driver
+
+# Configuration management (Phase 1 - Story 1.2)
+pydantic==2.5.0                 # Configuration validation
+python-dotenv==1.0.0            # Environment variable management
+
+# Future dependencies (to be added in later phases)
+faker==19.12.0                  # Fake data generation (Phase 4) - matches pytest-faker version
+cryptography==41.0.7            # Encryption for mapping tables (Phase 5 - Story 5.3)
+
+# Phase 3: AI Integration
+requests==2.31.0                # HTTP client for AI API
+requests-cache==1.1.1           # Response caching for AI API calls
+
+# Phase 2: Dependency resolution
+networkx==3.2.1                 # Dependency graph analysis (Phase 2)
+
+# Development and testing dependencies
+pytest==7.4.3                   # Testing framework
+pytest-cov==4.1.0               # Code coverage
+pytest-mock==3.12.0             # Mocking utilities
+
+# Code quality tools
+black==23.11.0                  # Code formatter
+pylint==3.0.3                   # Linter
+mypy==1.7.1                     # Static type checker
+
+# Phase 3: User Review Interface
+rich==13.7.0                    # Rich terminal formatting for CLI

@@ -1,0 +1,24 @@
+{
+	"hooks": {
+		"SessionStart": [
+			{
+				"type": "command",
+				"command": "powershell",
+				"windows": "powershell -NoProfile -ExecutionPolicy Bypass -File \".github/hooks/workflow-analysis.ps1\"",
+				"linux": "pwsh -NoProfile -ExecutionPolicy Bypass -File .github/hooks/workflow-analysis.ps1",
+				"osx": "pwsh -NoProfile -ExecutionPolicy Bypass -File .github/hooks/workflow-analysis.ps1",
+				"timeout": 5
+			}
+		],
+		"Stop": [
+			{
+				"type": "command",
+				"command": "powershell",
+				"windows": "powershell -NoProfile -ExecutionPolicy Bypass -File \".github/hooks/validate-standards.ps1\"",
+				"linux": "pwsh -NoProfile -ExecutionPolicy Bypass -File .github/hooks/validate-standards.ps1",
+				"osx": "pwsh -NoProfile -ExecutionPolicy Bypass -File .github/hooks/validate-standards.ps1",
+				"timeout": 10
+			}
+		]
+	}
+}

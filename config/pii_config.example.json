@@ -1,0 +1,140 @@
+{
+  "database": {
+    "server": "(localdb)\\MSSQLLocalDB",
+    "database": "Testsanitization",
+    "auth_type": "windows",
+    "timeout": 60,
+    "batch_size": 5000,
+    "max_retries": 5,
+    "retry_delay": 1.0,
+    "pool_size": 10,
+    "environment": "dev"
+  },
+  "logging": {
+    "level": "INFO",
+    "handlers": [
+      {
+        "type": "console",
+        "format_json": false
+      },
+      {
+        "type": "file",
+        "file_path": "logs/sanitization.log",
+        "max_bytes": 104857600,
+        "backup_count": 10,
+        "rotation_interval": "daily",
+        "format_json": true
+      }
+    ],
+    "pii_redaction": {
+      "enabled": true,
+      "redact_emails": true,
+      "redact_phones": true,
+      "redact_ssn": true,
+      "redact_credit_cards": true,
+      "patterns": {}
+    },
+    "include_correlation_id": true,
+    "log_format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  },
+  "ai": {
+    "enabled": true,
+    "api_url": "https://models.github.ai/inference/chat/completions",
+    "api_key_env_var": "GITHUB_COPILOT_TOKEN",
+    "model": "gpt-4o",
+    "timeout_seconds": 60,
+    "max_retries": 3,
+    "retry_backoff_factor": 1.0,
+    "cache_enabled": true,
+    "cache_ttl_hours": 24,
+    "max_tables_per_request": 50,
+    "max_schema_size_chars": 100000
+  },
+  "pii_columns": [
+    {
+      "schema": "dbo",
+      "table": "Customers",
+      "column": "Email",
+      "pii_type": "email",
+      "nullable": false
+    },
+    {
+      "schema": "dbo",
+      "table": "Customers",
+      "column": "Phone",
+      "pii_type": "phone",
+      "nullable": true
+    },
+    {
+      "schema": "dbo",
+      "table": "Customers",
+      "column": "FirstName",
+      "pii_type": "name",
+      "nullable": false
+    },
+    {
+      "schema": "dbo",
+      "table": "Customers",
+      "column": "LastName",
+      "pii_type": "name",
+      "nullable": false
+    },
+    {
+      "schema": "dbo",
+      "table": "Employees",
+      "column": "SSN",
+      "pii_type": "ssn",
+      "nullable": false
+    },
+    {
+      "schema": "dbo",
+      "table": "Employees",
+      "column": "PersonalEmail",
+      "pii_type": "email",
+      "nullable": true
+    },
+    {
+      "schema": "sales",
+      "table": "Orders",
+      "column": "BillingEmail",
+      "pii_type": "email",
+      "nullable": false
+    },
+    {
+      "schema": "dbo",
+      "table": "Products",
+      "column": "InternalCode",
+      "pii_type": "generic",
+      "nullable": true,
+      "custom_format": {
+        "character_class": "alpha"
+      },
+      "_comment": "GenericMasker with alpha-only character class"
+    },
+    {
+      "schema": "dbo",
+      "table": "Orders",
+      "column": "ReferenceNumber",
+      "pii_type": "generic",
+      "nullable": false,
+      "custom_format": {
+        "character_class": "numeric"
+      },
+      "_comment": "GenericMasker with numeric-only character class"
+    },
+    {
+      "schema": "dbo",
+      "table": "Inventory",
+      "column": "SKU",
+      "pii_type": "generic",
+      "nullable": false,
+      "custom_format": {
+        "character_class": "alphanumeric"
+      },
+      "_comment": "GenericMasker with alphanumeric character class (default)"
+    }
+  ],
+  "dry_run": false,
+  "validate_before": true,
+  "validate_after": true
+}

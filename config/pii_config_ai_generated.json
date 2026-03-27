@@ -1,0 +1,70 @@
+{
+  "database": {
+    "server": "(localdb)\\MSSQLLocalDB",
+    "database": "Testsanitization",
+    "auth_type": "windows",
+    "timeout": 60,
+    "batch_size": 5000
+  },
+  "pii_columns": [
+    {
+      "schema": "dbo",
+      "table": "customers",
+      "column": "full_name",
+      "pii_type": "name",
+      "nullable": true
+    },
+    {
+      "schema": "dbo",
+      "table": "customers",
+      "column": "email",
+      "pii_type": "email",
+      "nullable": true
+    },
+    {
+      "schema": "dbo",
+      "table": "customers",
+      "column": "mobile_num",
+      "pii_type": "phone",
+      "nullable": true
+    },
+    {
+      "schema": "dbo",
+      "table": "Orders",
+      "column": "email",
+      "pii_type": "email",
+      "nullable": true
+    },
+    {
+      "schema": "dbo",
+      "table": "Orders",
+      "column": "client_name",
+      "pii_type": "name",
+      "nullable": true
+    },
+    {
+      "schema": "dbo",
+      "table": "Orders",
+      "column": "contact_info",
+      "pii_type": "phone",
+      "nullable": true
+    },
+    {
+      "schema": "dbo",
+      "table": "Orders",
+      "column": "client_address",
+      "pii_type": "address",
+      "nullable": true
+    },
+    {
+      "schema": "dbo",
+      "table": "Orders",
+      "column": "client_pass",
+      "pii_type": "critical",
+      "nullable": true
+    }
+  ],
+  "dry_run": true,
+  "validate_before": true,
+  "validate_after": true
+}

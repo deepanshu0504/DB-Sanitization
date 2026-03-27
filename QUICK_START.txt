@@ -1,0 +1,151 @@
+╔════════════════════════════════════════════════════════════════╗
+║          REAL DATA TESTING - QUICK START GUIDE                 ║
+╚════════════════════════════════════════════════════════════════╝
+
+✅ SETUP COMPLETE
+
+📁 Files Created:
+   • .env (credentials configured)
+   • config/pii_config.production.json
+   • IMPLEMENTATION_SUMMARY.md
+
+📝 Files Updated:
+   • config/pii_config.example.json
+   • src/ai/copilot_client.py
+
+🔧 Configuration:
+   • Database: (localdb)\MSSQLLocalDB / Testsanitization
+   • AI API: https://models.github.ai
+   • Model: gpt-4o
+   • Token: ✓ Loaded from .env
+   • Dry Run: ✓ Enabled (SAFE)
+
+╔════════════════════════════════════════════════════════════════╗
+║                    STEP-BY-STEP WORKFLOW                       ║
+╚════════════════════════════════════════════════════════════════╝
+
+STEP 1: Test Database Connection
+────────────────────────────────────────────────────────────────
+python examples/connection_example.py
+
+Expected: ✓ Connection successful to Testsanitization
+
+
+STEP 2: Run AI PII Detection (PRIMARY STEP)
+────────────────────────────────────────────────────────────────
+python examples/ai_detection_example.py
+
+What it does:
+  • Connects to your Testsanitization database
+  • Extracts complete schema metadata
+  • Sends to GitHub Models API (gpt-4o)
+  • AI analyzes and identifies PII columns
+  • Generates: config/pii_config_ai_generated.json
+
+Expected output:
+  ════════════════════════════════════════════
+  AI-Powered PII Detection Example
+  ════════════════════════════════════════════
+  ✓ Configuration loaded
+  ✓ Connected to: (localdb)\MSSQLLocalDB
+  ✓ Extracted schema for N tables
+  ✓ AI detection complete: found X PII columns
+  ✓ Configuration saved to: config/pii_config_ai_generated.json
+
+
+STEP 3: Review AI-Generated Configuration
+────────────────────────────────────────────────────────────────
+code config/pii_config_ai_generated.json
+
+Review the detected PII columns:
+  • Verify accuracy
+  • Add/remove columns as needed
+  • Check nullable flags
+
+
+STEP 4: Validate Configuration
+────────────────────────────────────────────────────────────────
+python examples/validate_config_example.py config/pii_config_ai_generated.json
+
+What it checks:
+  • All tables/columns exist in database
+  • Data types are compatible
+  • Warns about FK/PK columns
+  • Validates schema consistency
+
+
+STEP 5: Dry Run Sanitization
+────────────────────────────────────────────────────────────────
+python examples/orchestrator_example.py config/pii_config_ai_generated.json --dry-run
+
+What it does:
+  • Simulates sanitization workflow
+  • NO DATA CHANGES (read-only)
+  • Validates process end-to-end
+  • Generates report in logs/
+
+
+STEP 6: Review Reports & Proceed
+────────────────────────────────────────────────────────────────
+1. Check logs/ directory for reports
+2. Review data integrity validation results
+3. When satisfied, update config:
+   • Set 'dry_run': false
+4. Run actual sanitization
+
+
+╔════════════════════════════════════════════════════════════════╗
+║                    TROUBLESHOOTING                             ║
+╚════════════════════════════════════════════════════════════════╝
+
+Issue: Database connection failed
+Fix:  • Verify SQL Server LocalDB is running:
+        sqllocaldb start MSSQLLocalDB
+      • Check database name: Testsanitization
+
+Issue: API authentication failed
+Fix:  • Verify .env file exists
+      • Check GITHUB_COPILOT_TOKEN in .env
+      • Test: python -c 'import os; from dotenv import load_dotenv; load_dotenv(); print(bool(os.getenv(\"GITHUB_COPILOT_TOKEN\")))'
+
+Issue: No PII columns detected
+Fix:  • Database might have no PII data
+      • Review schema manually
+      • Add columns manually to config
+
+Issue: Pydantic LogConfig error
+Fix:  • Use simplified configs (production.json)
+      • Or run AI detection directly (doesn't need full config)
+
+
+╔════════════════════════════════════════════════════════════════╗
+║                    IMPORTANT REMINDERS                         ║
+╚════════════════════════════════════════════════════════════════╝
+
+🔒 SECURITY:
+   • GitHub token is exposed in this chat - REGENERATE IT
+   • Never commit .env file (already in .gitignore)
+   • Backup database before actual sanitization
+
+⚠️  SAFETY:
+   • Always start with dry_run: true
+   • Test on database copy first
+   • Validate configurations thoroughly
+   • Keep mapping tables for desensitization
+
+📊 PERFORMANCE:
+   • Batch size: 5000 (adjust for your data volume)
+   • Timeout: 60s (increase for large schemas)
+   • Monitor logs/ for performance metrics
+
+
+╔════════════════════════════════════════════════════════════════╗
+║                    START HERE                                  ║
+╚════════════════════════════════════════════════════════════════╝
+
+Run this command now:
+
+    python examples/ai_detection_example.py
+
+This will identify all PII columns in your Testsanitization database!
+
