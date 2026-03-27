@@ -18,7 +18,7 @@ try:
     conn_str_master = (
         "DRIVER={ODBC Driver 17 for SQL Server};"
         "SERVER=(localdb)\\MSSQLLocalDB;"
-        "DATABASE=master;"
+        "DATABASE=AdventureWorks2016;"
         "Trusted_Connection=yes;"
         "Connection Timeout=10;"
     )

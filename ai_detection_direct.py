@@ -35,7 +35,7 @@ if not api_key:
 
 # Database config
 server = "(localdb)\\MSSQLLocalDB"
-database = "Testsanitization"
+database = "AdventureWorks2016"
 conn_str = (
     f"DRIVER={{ODBC Driver 17 for SQL Server}};"
     f"SERVER={server};"
@@ -48,10 +48,17 @@ logger.info("\n1. Connecting to database...")
 conn = pyodbc.connect(conn_str)
 logger.info(f"   + Connected to {server}/{database}")
 
-logger.info("\n2. Extracting schema...")
+logger.info("\n2. Extracting schema with filtering...")
 cursor = conn.cursor()
 
-# Get tables
+# Tables to exclude (system and metadata tables)
+TABLES_TO_EXCLUDE = [
+    "sanitization_metadata", "sysdiagrams", "selective_token_mappings", 
+    "encrypted_originals", "detokenization_audit", "backup_tracking", "batch_processing_log",
+    "__RefactorLog", "dtproperties", "MSreplication_options", "token_mappings"
+]
+
+# Get tables with exclusion filtering
 cursor.execute("""
     SELECT TABLE_SCHEMA, TABLE_NAME
     FROM INFORMATION_SCHEMA.TABLES
@@ -60,7 +67,20 @@ cursor.execute("""
 """)
 
 tables = []
+excluded_count = 0
 for row in cursor.fetchall():
+    # Filter out excluded tables and backup/temp tables
+    table_name = row.TABLE_NAME.lower()
+    full_name = f"{row.TABLE_SCHEMA}.{row.TABLE_NAME}".lower()
+    
+    # Skip excluded tables
+    if (table_name in [t.lower() for t in TABLES_TO_EXCLUDE] or
+        full_name in [t.lower() for t in TABLES_TO_EXCLUDE] or
+        table_name.startswith(('backup_', 'temp_', 'staging_')) or
+        table_name.endswith(('_sanitized', '_backup', '_temp'))):
+        excluded_count += 1
+        continue
+    
     table = {
         "schema": row.TABLE_SCHEMA,
         "name": row.TABLE_NAME,
@@ -87,19 +107,21 @@ for row in cursor.fetchall():
 
 conn.close()
 
-logger.info(f"   + Found {len(tables)} tables:")
-for table in tables:
+logger.info(f"   + Found {len(tables)} tables (excluded {excluded_count} system/metadata tables):")
+for table in tables[:5]:  # Show only first 5 to avoid log spam
     logger.info(f"     - {table['schema']}.{table['name']} ({len(table['columns'])} columns)")
+if len(tables) > 5:
+    logger.info(f"     ... and {len(tables) - 5} more tables")
 
-# Build prompt
-schema_json = json.dumps({"database_name": database, "tables": tables}, indent=2)
+# Build efficient prompt using markdown tables instead of verbose JSON
+total_columns = sum(len(table['columns']) for table in tables)
 
 system_prompt = """You are a database security expert specializing in identifying PII (Personally Identifiable Information) in database schemas.
 
 Analyze the provided database schema and identify all columns that likely contain PII data.
 
 For each PII column, determine the type:
-- "email": Email addresses
+- "email": Email addresses  
 - "phone": Phone numbers
 - "name": Person names (first, last, full)
 - "ssn": Social Security Numbers
@@ -112,12 +134,43 @@ Return ONLY a JSON array of objects with this structure:
 Example:
 [{"schema": "dbo", "table": "users", "column": "email", "pii_type": "email", "reason": "Contains email addresses"}]"""
 
-user_prompt = f"Analyze this database schema and identify PII columns:\n\n{schema_json}"
+user_prompt = f"""# Database PII Detection Analysis
+
+**Database**: {database} (Microsoft SQL Server)
+**Tables**: {len(tables)} | **Columns**: {total_columns}
+
+## Schema Details
+"""
+
+# Add schema information using compact markdown format
+for table in tables:
+    user_prompt += f"\n**Table: {table['schema']}.{table['name']}**\n"
+    user_prompt += "| Column | Type | Length | Nullable |\n|--------|------|--------|----------|\n"
+    
+    for col in table['columns']:
+        data_type = col['data_type']
+        max_length = col['max_length'] if col['max_length'] else 'N/A'
+        nullable = 'Yes' if col['nullable'] else 'No'
+        user_prompt += f"| {col['name']} | {data_type} | {max_length} | {nullable} |\n"
+    
+    user_prompt += "\n"
+
+user_prompt += """
+## Task
+Identify PII columns based on:
+- Column names (primary indicator)
+- Data types and constraints  
+- Regulatory compliance needs (GDPR, CCPA, HIPAA)
+
+Focus on finding: emails, phones, names, addresses, SSNs, and other sensitive identifiers.
+
+Respond with JSON array only, no additional text.
+"""
 
 logger.info("\n3. Calling AI API...")
 logger.info(f"   + Endpoint: https://models.github.ai/inference/chat/completions")
 logger.info(f"   + Model: gpt-4o")
-logger.info(f"   + Schema size: {len(schema_json)} chars")
+logger.info(f"   + Prompt size: {len(user_prompt)} chars (reduced from JSON format)")
 
 # Make API call
 payload = {

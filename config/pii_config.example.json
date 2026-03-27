@@ -1,7 +1,7 @@
 {
   "database": {
     "server": "(localdb)\\MSSQLLocalDB",
-    "database": "Testsanitization",
+    "database": "AdventureWorks2016",
     "auth_type": "windows",
     "timeout": 60,
     "batch_size": 5000,

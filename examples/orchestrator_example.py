@@ -159,7 +159,7 @@ def example_progress_callbacks():
         percentage: float
     ):
         """Called after each batch is processed."""
-        print(f"  {table_name}: {rows_processed}/{total rows} ({percentage:.1f}%)")
+        print(f"  {table_name}: {rows_processed}/{total_rows} ({percentage:.1f}%)")
     
     orchestrator = SanitizationOrchestrator()
     
