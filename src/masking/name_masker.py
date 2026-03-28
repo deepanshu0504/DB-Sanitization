@@ -189,6 +189,9 @@ class NameMasker(BaseMasker):
         # Strip whitespace
         value = value.strip()
         
+        # PRE-VALIDATE: Check constraints before generation
+        self._pre_validate_constraints(column_info, min_length_required=self.MIN_LENGTH)
+        
         # Validate name format (log warning if invalid, but continue masking)
         if not self._validate_name_format(value):
             self.logger.warning(
@@ -205,11 +208,17 @@ class NameMasker(BaseMasker):
         # Generate deterministic seed from input
         seed = self._get_deterministic_seed(value)
         
-        # Generate fake name based on length constraints
+        # SMART GENERATION: Generate name based on length constraints
         fake_name = self._generate_name(seed, name_structure, column_info.effective_max_length)
         
-        # Validate length constraints
-        fake_name = self._validate_length(fake_name, column_info)
+        # POST-VALIDATE: Length (should never truncate with smart generation)
+        fake_name, was_truncated = self._validate_length(fake_name, column_info)
+        
+        if was_truncated:
+            self.logger.error(
+                f"Name generation bug: truncation occurred despite smart generation",
+                extra={"seed": seed, "max_length": column_info.effective_max_length}
+            )
         
         # Validate data type
         self._validate_data_type(fake_name, column_info)

@@ -208,6 +208,9 @@ class GenericMasker(BaseMasker):
         # Strip whitespace
         value = value.strip()
         
+        # PRE-VALIDATE: Check constraints before generation (minimum 1 char)
+        self._pre_validate_constraints(column_info, min_length_required=1)
+        
         # Determine target length (preserve original up to max_length)
         original_length = len(value)
         target_length = min(original_length, column_info.effective_max_length)
@@ -218,8 +221,14 @@ class GenericMasker(BaseMasker):
         # Generate fake string based on target length
         fake_string = self._generate_string(seed, target_length)
         
-        # Validate length constraints
-        fake_string = self._validate_length(fake_string, column_info)
+        # POST-VALIDATE: Length (should never truncate since we generate exact length)
+        fake_string, was_truncated = self._validate_length(fake_string, column_info)
+        
+        if was_truncated:
+            self.logger.error(
+                f"Generic generation bug: truncation occurred",
+                extra={"seed": seed, "target_length": target_length, "max_length": column_info.effective_max_length}
+            )
         
         # Validate data type
         self._validate_data_type(fake_string, column_info)

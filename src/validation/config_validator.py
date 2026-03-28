@@ -13,6 +13,12 @@ from typing import Dict, List, Optional, Set, Tuple, Any
 
 from ..config.config_models import SanitizationConfig, PIIColumnConfig
 from ..database.schema_extractor import SchemaExtractor
+from ..database.name_normalizer import (
+    normalize_identifier,
+    build_qualified_name,
+    CaseInsensitiveDict,
+    identifiers_match
+)
 from ..error_codes import ErrorCodes
 from ..logging.logger import get_logger
 from .validation_result import ValidationResult, IssueSeverity
@@ -202,7 +208,8 @@ class ConfigValidator:
             config: Configuration with PII columns to extract metadata for
         
         Returns:
-            Dictionary with schemas, tables, columns, PKs, FKs metadata
+            Dictionary with schemas, tables, columns, PKs, FKs metadata using
+            case-insensitive lookups for all database object names
         
         Raises:
             Exception: If schema extraction fails
@@ -210,17 +217,19 @@ class ConfigValidator:
         # Get unique schemas and tables from config
         schemas_to_check = set(col.schema for col in config.pii_columns)
         
+        # Use CaseInsensitiveDict for all object name lookups
         metadata = {
-            "schemas": {},
-            "tables": {},
-            "columns": {},
-            "primary_keys": {},
+            "schemas": CaseInsensitiveDict(),
+            "tables": CaseInsensitiveDict(),
+            "columns": CaseInsensitiveDict(),
+            "primary_keys": CaseInsensitiveDict(),
             "foreign_keys": []
         }
         
         # Extract schemas
         all_schemas = self.schema_extractor.get_schemas()
-        metadata["schemas"] = {s["schema_name"]: s for s in all_schemas}
+        for schema_info in all_schemas:
+            metadata["schemas"][schema_info["schema_name"]] = schema_info
         
         # Extract tables and columns for each schema
         for schema in schemas_to_check:
@@ -230,14 +239,15 @@ class ConfigValidator:
             tables = self.schema_extractor.get_tables(schema)
             for table_info in tables:
                 table_name = table_info["table_name"]
-                qualified_name = f"[{schema}].[{table_name}]"
+                # Use normalized qualified name for case-insensitive lookup
+                qualified_name = build_qualified_name(schema, table_name, normalize=True)
                 metadata["tables"][qualified_name] = table_info
                 
-                # Get columns for this table
+                # Get columns for this table - use CaseInsensitiveDict
                 columns = self.schema_extractor.get_columns(schema, table_name)
-                metadata["columns"][qualified_name] = {
-                    col["column_name"]: col for col in columns
-                }
+                metadata["columns"][qualified_name] = CaseInsensitiveDict(
+                    {col["column_name"]: col for col in columns}
+                )
         
         # Extract primary keys
         for schema in schemas_to_check:
@@ -246,7 +256,7 @@ class ConfigValidator:
             
             pks = self.schema_extractor.get_primary_keys(schema)
             for pk in pks:
-                qualified_name = f"[{pk['schema']}].[{pk['table']}]"
+                qualified_name = build_qualified_name(pk['schema'], pk['table'], normalize=True)
                 if qualified_name not in metadata["primary_keys"]:
                     metadata["primary_keys"][qualified_name] = []
                 metadata["primary_keys"][qualified_name].append(pk["column"])
@@ -276,7 +286,8 @@ class ConfigValidator:
             result: ValidationResult to accumulate issues
         """
         qualified_name = pii_col.fully_qualified_name
-        qualified_table = f"[{pii_col.schema}].[{pii_col.table}]"
+        # Use normalized qualified name for case-insensitive lookups
+        qualified_table = build_qualified_name(pii_col.schema, pii_col.table, normalize=True)
         
         # 1. Validate column existence
         column_info = self._validate_column_existence(
@@ -330,18 +341,22 @@ class ConfigValidator:
         """
         Validate that schema, table, and column exist in database.
         
+        Uses case-insensitive comparison for all database object names to ensure
+        compatibility with any SQL Server collation or naming convention.
+        
         Args:
             pii_col: PII column configuration
-            schema_metadata: Extracted schema metadata
+            schema_metadata: Extracted schema metadata with CaseInsensitiveDicts
             result: ValidationResult to accumulate issues
         
         Returns:
             Column metadata dictionary if exists, None otherwise
         """
         qualified_name = pii_col.fully_qualified_name
-        qualified_table = f"[{pii_col.schema}].[{pii_col.table}]"
+        # Use normalized qualified name for lookups (case-insensitive)
+        qualified_table = build_qualified_name(pii_col.schema, pii_col.table, normalize=True)
         
-        # Check schema exists
+        # Check schema exists (case-insensitive via CaseInsensitiveDict)
         if pii_col.schema not in schema_metadata["schemas"]:
             result.add_error(
                 f"Schema '{pii_col.schema}' does not exist in database",
@@ -352,7 +367,7 @@ class ConfigValidator:
             return None
         
         # Warn about system schemas
-        if pii_col.schema in self.SYSTEM_SCHEMAS:
+        if pii_col.schema.lower() in [s.lower() for s in self.SYSTEM_SCHEMAS]:
             result.add_warning(
                 f"Schema '{pii_col.schema}' is a system schema",
                 column=qualified_name,
@@ -370,7 +385,7 @@ class ConfigValidator:
             )
             return None
         
-        # Check table exists
+        # Check table exists (case-insensitive via CaseInsensitiveDict)
         if qualified_table not in schema_metadata["tables"]:
             result.add_error(
                 f"Table '{pii_col.table}' does not exist in schema '{pii_col.schema}'",
@@ -390,7 +405,7 @@ class ConfigValidator:
                 suggested_action="Sanitizing views may not work as expected - sanitize base tables instead"
             )
         
-        # Check column exists
+        # Check column exists (case-insensitive via CaseInsensitiveDict)
         if qualified_table not in schema_metadata["columns"]:
             result.add_error(
                 f"No column metadata found for table '{qualified_table}'",
@@ -585,6 +600,8 @@ class ConfigValidator:
         """
         Validate foreign key column sanitization risks.
         
+        Uses case-insensitive comparison for schema/table/column names.
+        
         Args:
             pii_col: PII column configuration
             schema_metadata: Extracted schema metadata
@@ -592,12 +609,12 @@ class ConfigValidator:
         """
         qualified_name = pii_col.fully_qualified_name
         
-        # Check if column is a foreign key (child)
+        # Check if column is a foreign key (child) - case-insensitive comparison
         fk_references = [
             fk for fk in schema_metadata["foreign_keys"]
-            if (fk["child_schema"] == pii_col.schema and
-                fk["child_table"] == pii_col.table and
-                fk["child_column"] == pii_col.column)
+            if (identifiers_match(fk["child_schema"], pii_col.schema) and
+                identifiers_match(fk["child_table"], pii_col.table) and
+                identifiers_match(fk["child_column"], pii_col.column))
         ]
         
         if fk_references:

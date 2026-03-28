@@ -100,6 +100,11 @@ class PhoneMasker(BaseMasker):
     # Minimum column length required for phone masking
     MIN_LENGTH = 10
     
+    # Format tier thresholds
+    FORMAT_STANDARD = 14  # "(555) 555-5555"
+    FORMAT_COMPACT = 12   # "555-555-5555"
+    FORMAT_MINIMAL = 10   # "5555555555"
+    
     # Phone number format validation patterns
     # US formats: (555) 123-4567, 555-123-4567, 555.123.4567, 5551234567
     US_PHONE_PATTERN = re.compile(
@@ -188,6 +193,9 @@ class PhoneMasker(BaseMasker):
         # Strip whitespace
         value = value.strip()
         
+        # PRE-VALIDATE: Check constraints before generation
+        self._pre_validate_constraints(column_info, min_length_required=self.MIN_LENGTH)
+        
         # Validate phone format (log warning if invalid, but continue masking)
         if not self._validate_phone_format(value):
             self.logger.warning(
@@ -201,11 +209,21 @@ class PhoneMasker(BaseMasker):
         # Generate deterministic seed from input
         seed = self._get_deterministic_seed(value)
         
-        # Generate fake phone number based on length constraints
-        fake_phone = self._generate_phone(seed, column_info.effective_max_length)
+        # SMART GENERATION: Select format based on available space
+        fake_phone = self._generate_phone_smart(seed, column_info)
         
-        # Validate length constraints
-        fake_phone = self._validate_length(fake_phone, column_info)
+        # POST-VALIDATE: Length (should never truncate with smart generation)
+        fake_phone, was_truncated = self._validate_length(fake_phone, column_info)
+        
+        # If truncated, log detailed error for debugging
+        if was_truncated:
+            self.logger.error(
+                f"Phone generation bug: truncation occurred despite smart generation",
+                extra={
+                    "seed": seed,
+                    "max_length": column_info.effective_max_length
+                }
+            )
         
         # Validate data type
         self._validate_data_type(fake_phone, column_info)
@@ -218,15 +236,70 @@ class PhoneMasker(BaseMasker):
                 "fake_length": len(fake_phone),
                 "max_length": column_info.max_length,
                 "data_type": column_info.data_type,
-                "format_tier": self._get_format_tier(column_info.effective_max_length)
+                "format_tier": self._get_format_tier(column_info.effective_max_length),
+                "was_truncated": was_truncated
             }
         )
         
         return fake_phone
     
+    def _generate_phone_smart(
+        self,
+        seed: int,
+        column_info: ColumnInfo
+    ) -> str:
+        """
+        Generate phone with format optimized for column length (smart generation).
+        
+        Selects the appropriate format tier based on available space BEFORE
+        generating the value, ensuring the result fits without truncation.
+        
+        Format tiers:
+        - Standard (≥14 chars): (555) 555-5555
+        - Compact (≥12 chars): 555-555-5555
+        - Minimal (≥10 chars): 5555555555
+        
+        Args:
+            seed: Deterministic seed for generation
+            column_info: Column metadata with max_length
+            
+        Returns:
+            Phone that fits within column constraints
+            
+        Raises:
+            MaskingError: If max_length < MIN_LENGTH (should be caught by pre-validation)
+        """
+        max_length = column_info.effective_max_length
+        
+        # Generate phone components (same for all formats)
+        exchange = ((seed // 10000) % 900) + 100  # 100-999
+        subscriber = (seed % 9000) + 1000  # 1000-9999
+        
+        # Select format tier
+        if max_length >= self.FORMAT_STANDARD:
+            return f"({self.AREA_CODE}) {exchange:03d}-{subscriber:04d}"
+        
+        elif max_length >= self.FORMAT_COMPACT:
+            return f"{self.AREA_CODE}-{exchange:03d}-{subscriber:04d}"
+        
+        elif max_length >= self.FORMAT_MINIMAL:
+            return f"{self.AREA_CODE}{exchange:03d}{subscriber:04d}"
+        
+        else:
+            # Should never reach here (pre-validation catches this)
+            raise MaskingError(
+                message=f"Column too short for phone: {max_length} < {self.MIN_LENGTH}",
+                error_code=ErrorCodes.INSUFFICIENT_COLUMN_LENGTH,
+                is_retryable=False,
+                suggested_action=f"Increase column length to at least {self.MIN_LENGTH}"
+            )
+    
     def _generate_phone(self, seed: int, max_length: int) -> str:
         """
-        Generate a fake phone number deterministically based on seed and length constraints.
+        DEPRECATED: Use _generate_phone_smart() instead.
+        
+        This method checks length then formats.
+        Kept for backwards compatibility only.
         
         Uses modulo arithmetic for deterministic digit generation:
         - Exchange (middle 3 digits): ((seed // 10000) % 900) + 100 (range 100-999)
@@ -248,17 +321,6 @@ class PhoneMasker(BaseMasker):
         
         Raises:
             MaskingError: If max_length < 10 (minimum required)
-        
-        Examples:
-            >>> masker = PhoneMasker(seed=42)
-            >>> masker._generate_phone(12345, 20)
-            '(555) 512-2345'  # Standard format
-            >>> 
-            >>> masker._generate_phone(12345, 12)
-            '555-512-2345'  # Compact format
-            >>> 
-            >>> masker._generate_phone(12345, 10)
-            '5555122345'  # Minimal format
         """
         # Check minimum length requirement
         if max_length < self.MIN_LENGTH:

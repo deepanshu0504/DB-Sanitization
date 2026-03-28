@@ -88,7 +88,7 @@ class EmailMasker(BaseMasker):
         >>> # email3 might be user_e5f6g7h8@test.org
     """
     
-    # Domain pool for fake email generation (10 domains for diversity)
+    # Standard domains for large columns (≥26 chars)
     DOMAINS = [
         "example.com",    # Standard test domain
         "test.org",       # Alternative test domain
@@ -102,8 +102,21 @@ class EmailMasker(BaseMasker):
         "anon.site",      # Anonymous domain
     ]
     
-    # Shortest domain for extreme length constraints
-    SHORTEST_DOMAIN = "y.co"  # 4 characters
+    # Compact domains for medium columns (≥18 chars)
+    COMPACT_DOMAINS = [
+        "demo.co",
+        "test.io",
+        "fake.me",
+        "mask.to",
+        "anon.ai",
+        "item.io"
+    ]
+    
+    # Minimal domains for small columns (≥6 chars)
+    MINIMAL_DOMAINS = ["y.co", "x.io", "z.me"]
+    
+    # Minimum viable email length
+    MIN_LENGTH = 6  # a@x.co
     
     # RFC 5322 email format validation (simplified)
     EMAIL_REGEX = re.compile(
@@ -151,12 +164,12 @@ class EmailMasker(BaseMasker):
         column_info: ColumnInfo
     ) -> Optional[str]:
         """
-        Mask an email address deterministically.
+        Mask an email address with smart format selection based on column length.
         
         This method generates a fake email address while preserving the following:
         - Determinism: same input → same output (critical for FK integrity)
         - Valid format: always generates RFC 5322 compliant emails
-        - Length constraints: respects column max_length
+        - Length constraints: respects column max_length (smart generation)
         - Data type: VARCHAR (ASCII) vs NVARCHAR (Unicode)
         
         Args:
@@ -192,6 +205,9 @@ class EmailMasker(BaseMasker):
         # Strip whitespace
         value = value.strip()
         
+        # PRE-VALIDATE: Check constraints before generation
+        self._pre_validate_constraints(column_info, min_length_required=self.MIN_LENGTH)
+        
         # Validate input format (log warning if invalid)
         if not self._validate_email_format(value):
             self.logger.warning(
@@ -205,11 +221,25 @@ class EmailMasker(BaseMasker):
         # Generate deterministic seed from input
         seed = self._get_deterministic_seed(value)
         
-        # Generate fake email
-        fake_email = self._generate_email(seed, column_info.effective_max_length)
+        # SMART GENERATION: Select format based on available space
+        fake_email = self._generate_email_smart(seed, column_info)
         
-        # Validate length
-        fake_email = self._validate_length(fake_email, column_info)
+        # POST-VALIDATE: Length (should never truncate with smart generation)
+        fake_email, was_truncated = self._validate_length(fake_email, column_info)
+        
+        # If truncated, log detailed error for debugging
+        if was_truncated:
+            self.logger.error(
+                f"Email generation bug: truncation occurred despite smart generation",
+                extra={
+                    "seed": seed,
+                    "max_length": column_info.effective_max_length,
+                    "generated_length": len(fake_email) + (
+                        self.truncation_details[-1]["original_length"] -
+                        self.truncation_details[-1]["truncated_length"]
+                    )
+                }
+            )
         
         # Validate data type
         self._validate_data_type(fake_email, column_info)
@@ -220,15 +250,157 @@ class EmailMasker(BaseMasker):
                 "value_hash": self._hash_value(value),
                 "fake_length": len(fake_email),
                 "max_length": column_info.max_length,
-                "data_type": column_info.data_type
+                "data_type": column_info.data_type,
+                "was_truncated": was_truncated
             }
         )
         
         return fake_email
     
+    def _generate_email_smart(
+        self,
+        seed: int,
+        column_info: ColumnInfo
+    ) -> str:
+        """
+        Generate email with format optimized for column length (smart generation).
+        
+        Selects the appropriate format tier based on available space BEFORE
+        generating the value, ensuring the result fits without truncation.
+        
+        Format tiers:
+        - Standard (≥26 chars): user_a1b2c3d4@example.com
+        - Compact (≥18 chars): u_a1b2c3@demo.co
+        - Minimal (≥6 chars): a@x.co
+        
+        Args:
+            seed: Deterministic seed for generation
+            column_info: Column metadata with max_length
+            
+        Returns:
+            Email that fits within column constraints
+            
+        Raises:
+            MaskingError: If max_length < MIN_LENGTH (should be caught by pre-validation)
+        """
+        max_length = column_info.effective_max_length
+        
+        # Tier 1: Standard format (26+ chars)
+        if max_length >= 26:
+            return self._generate_standard_email(seed, max_length)
+        
+        # Tier 2: Compact format (18-25 chars)
+        elif max_length >= 18:
+            return self._generate_compact_email(seed, max_length)
+        
+        # Tier 3: Minimal format (6-17 chars)
+        elif max_length >= self.MIN_LENGTH:
+            return self._generate_minimal_email(seed, max_length)
+        
+        # Should never reach here (pre-validation catches this)
+        else:
+            raise MaskingError(
+                message=f"Column too short for email: {max_length} < {self.MIN_LENGTH}",
+                error_code=ErrorCodes.INSUFFICIENT_COLUMN_LENGTH,
+                is_retryable=False,
+                suggested_action=f"Increase column length to at least {self.MIN_LENGTH}"
+            )
+    
+    def _generate_standard_email(self, seed: int, max_length: int) -> str:
+        """
+        Generate standard format: user_a1b2c3d4@example.com
+        
+        Args:
+            seed: Deterministic seed
+            max_length: Maximum allowed length
+            
+        Returns:
+            Standard format email
+        """
+        domain = self.DOMAINS[seed % len(self.DOMAINS)]
+        
+        # Calculate available space for username
+        available_for_username = max_length - len(domain) - 1  # -1 for '@'
+        
+        # Generate username to fit available space
+        hash_hex = hex(seed)[2:].zfill(8)
+        username_base = "user_" + hash_hex
+        
+        # Truncate username if needed (keep "user_" prefix + hash)
+        if len(username_base) > available_for_username:
+            # Keep "user_" + truncated hash
+            hash_part = username_base[5:available_for_username]
+            username = "user_" + hash_part if available_for_username > 5 else username_base[:available_for_username]
+        else:
+            username = username_base
+        
+        email = f"{username}@{domain}"
+        
+        # Double-check length (paranoid validation)
+        if len(email) > max_length:
+            # Fallback: Use shorter domain
+            return self._generate_compact_email(seed, max_length)
+        
+        return email
+    
+    def _generate_compact_email(self, seed: int, max_length: int) -> str:
+        """
+        Generate compact format: u_a1b2c3@demo.co
+        
+        Args:
+            seed: Deterministic seed
+            max_length: Maximum allowed length
+            
+        Returns:
+            Compact format email
+        """
+        domain = self.COMPACT_DOMAINS[seed % len(self.COMPACT_DOMAINS)]
+        
+        available_for_username = max_length - len(domain) - 1
+        
+        hash_hex = hex(seed)[2:].zfill(6)
+        username_base = "u_" + hash_hex
+        
+        if len(username_base) > available_for_username:
+            hash_part = username_base[2:available_for_username]
+            username = "u_" + hash_part if available_for_username > 2 else username_base[:available_for_username]
+        else:
+            username = username_base
+        
+        email = f"{username}@{domain}"
+        
+        if len(email) > max_length:
+            return self._generate_minimal_email(seed, max_length)
+        
+        return email
+    
+    def _generate_minimal_email(self, seed: int, max_length: int) -> str:
+        """
+        Generate minimal format: a@x.co (6 chars minimum)
+        
+        Args:
+            seed: Deterministic seed
+            max_length: Maximum allowed length
+            
+        Returns:
+            Minimal format email
+        """
+        domain = self.MINIMAL_DOMAINS[seed % len(self.MINIMAL_DOMAINS)]
+        
+        # Single character username (a-z based on seed)
+        username_char = chr(97 + (seed % 26))  # 'a' to 'z'
+        
+        email = f"{username_char}@{domain}"
+        
+        # Should always fit (6 chars minimum, validated in pre-check)
+        return email
+    
     def _generate_email(self, seed: int, max_length: int) -> str:
         """
-        Generate a fake email address from a deterministic seed.
+        DEPRECATED: Use _generate_email_smart() instead.
+        
+        This method generates fixed format then truncates.
+        Kept for backwards compatibility only.
         
         Uses multi-tier optimization to fit within column length constraints:
         1. Standard: user_{hash8}@{domain} (~26 chars)
@@ -273,8 +445,9 @@ class EmailMasker(BaseMasker):
             )
             return email_compact
         
-        # Try with shortest domain
-        email_compact_short = f"{username_compact}@{self.SHORTEST_DOMAIN}"
+        # Try with minimal domain
+        shortest_domain = self.MINIMAL_DOMAINS[0]  # Use first minimal domain for backward compatibility
+        email_compact_short = f"{username_compact}@{shortest_domain}"
         
         if len(email_compact_short) <= max_length:
             self.logger.debug(
@@ -283,7 +456,7 @@ class EmailMasker(BaseMasker):
             return email_compact_short
         
         # Minimal format: x@{shortest_domain}
-        email_minimal = f"x@{self.SHORTEST_DOMAIN}"
+        email_minimal = f"x@{shortest_domain}"
         
         if len(email_minimal) <= max_length:
             self.logger.warning(

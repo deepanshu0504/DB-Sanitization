@@ -335,6 +335,82 @@ class DependencyResolver:
                 reason=f"Topological sort failed: {str(e)}"
             ) from e
     
+    def get_processing_levels(self) -> List[List[str]]:
+        """
+        Get tables grouped by dependency level for parallel processing.
+        
+        Returns tables grouped into levels where all tables within a level
+        can be processed in parallel (no dependencies between them).
+        Levels must be processed sequentially (level N depends on level N-1).
+        
+        Uses networkx.topological_generations which groups nodes by their
+        topological generation (distance from root nodes).
+        
+        Complexity: O(V + E)
+        
+        Returns:
+            List of lists, where each inner list contains table names at that level
+            Level 0: Tables with no dependencies (can process first, in parallel)
+            Level 1: Tables depending only on Level 0 (can process in parallel)
+            Level N: Tables depending on Level N-1
+            
+        Raises:
+            CircularDependencyError: If circular dependencies detected
+            
+        Example:
+            >>> levels = resolver.get_processing_levels()
+            [
+                ['dbo.Customer', 'dbo.Product', 'dbo.Category'],  # Level 0: No deps
+                ['dbo.Order', 'dbo.Address'],                     # Level 1: Depend on Level 0
+                ['dbo.OrderItem']                                  # Level 2: Depends on Order
+            ]
+            # Process Level 0 tables in parallel (3 threads)
+            # Wait for Level 0 completion
+            # Process Level 1 tables in parallel (2 threads)
+            # Wait for Level 1 completion
+            # Process Level 2 tables (1 thread)
+        """
+        # Check for circular dependencies first
+        cycles = self._detect_cycles()
+        if cycles:
+            raise CircularDependencyError.circular_dependency_detected(
+                cycles=cycles
+            )
+        
+        try:
+            # Use topological_generations to group by dependency level
+            # Returns iterator of sets, convert to lists
+            levels = [list(generation) for generation in nx.topological_generations(self.graph)]
+            
+            self.logger.info(
+                "Processing levels determined for parallel execution",
+                level_count=len(levels),
+                level_sizes=[len(level) for level in levels],
+                total_tables=sum(len(level) for level in levels),
+                max_parallelism=max(len(level) for level in levels) if levels else 0
+            )
+            
+            # Log per-level details
+            for level_num, level_tables in enumerate(levels):
+                self.logger.debug(
+                    f"Level {level_num}: {len(level_tables)} tables",
+                    level=level_num,
+                    table_count=len(level_tables),
+                    tables=level_tables[:5]  # Show first 5
+                )
+            
+            return levels
+        
+        except nx.NetworkXError as e:
+            self.logger.error(
+                "Failed to generate processing levels",
+                error=str(e),
+                error_type=type(e).__name__
+            )
+            raise CircularDependencyError.invalid_dependency_graph(
+                reason=f"Level generation failed: {str(e)}"
+            ) from e
+    
     def get_dependencies(self, table: str) -> List[str]:
         """
         Get direct parent dependencies for a given table.

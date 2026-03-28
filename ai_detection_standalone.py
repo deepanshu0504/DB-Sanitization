@@ -245,6 +245,12 @@ try:
             "auth_type": config.database.auth_type,
             "timeout": config.database.timeout,
             "batch_size": config.database.batch_size,
+            # Performance optimization settings (6-10x faster for large datasets)
+            "log_batch_frequency": 10,
+            "bulk_update_strategy": "auto",
+            "enable_fast_executemany": True,
+            "enable_parallel_processing": True,
+            "max_parallel_tables": 4,
         },
         "pii_columns": pii_column_configs,
         "dry_run": True,

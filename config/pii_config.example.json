@@ -1,14 +1,19 @@
 {
   "database": {
     "server": "(localdb)\\MSSQLLocalDB",
-    "database": "AdventureWorks2016",
+    "database": "Testsanitization",
     "auth_type": "windows",
     "timeout": 60,
     "batch_size": 5000,
     "max_retries": 5,
     "retry_delay": 1.0,
     "pool_size": 10,
-    "environment": "dev"
+    "environment": "dev",
+    "log_batch_frequency": 10,
+    "bulk_update_strategy": "auto",
+    "enable_fast_executemany": true,
+    "enable_parallel_processing": true,
+    "max_parallel_tables": 4
   },
   "logging": {
     "level": "INFO",

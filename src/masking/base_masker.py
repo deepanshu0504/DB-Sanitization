@@ -181,6 +181,10 @@ class BaseMasker(ABC):
         self.seed = seed
         self.null_strategy = null_strategy
         self.logger = logger or get_logger(self.__class__.__name__)
+        
+        # Track truncation events (should be zero with smart generation)
+        self.truncation_count = 0
+        self.truncation_details = []  # List of {original_length, truncated_length, data_type}
     
     @abstractmethod
     def mask(self, value: Any, column_info: ColumnInfo) -> Any:
@@ -261,7 +265,7 @@ class BaseMasker(ABC):
         self,
         value: str,
         column_info: ColumnInfo
-    ) -> str:
+    ) -> tuple[str, bool]:
         """
         Validate and truncate value to fit within column length constraints.
         
@@ -271,32 +275,44 @@ class BaseMasker(ABC):
         - Variable-length columns (VARCHAR) - truncates if needed
         - NVARCHAR (character count) vs VARCHAR (byte count)
         
+        Note: With smart generation, truncation should NEVER occur.
+              If it does, this indicates a bug in generation logic.
+        
         Args:
             value: String value to validate
             column_info: Column metadata with length constraints
             
         Returns:
-            Validated string that fits within column constraints
+            Tuple of (validated_value, was_truncated)
             
         Raises:
             MaskingError: If column has insufficient length for any valid value
         """
         if not isinstance(value, str):
-            return value  # Non-string values don't need length validation
+            return value, False  # Non-string values don't need length validation
         
         max_length = column_info.effective_max_length
+        was_truncated = False
+        original_length = 0
         
         # For NVARCHAR/NCHAR, count characters
         if column_info.is_unicode:
             if len(value) > max_length:
+                was_truncated = True
+                original_length = len(value)
                 # Truncate at character boundary
                 truncated = value[:max_length]
-                self.logger.warning(
-                    f"Truncated value from {len(value)} to {max_length} characters",
+                
+                # Log as ERROR - this should not happen with smart generation
+                self.logger.error(
+                    f"GENERATION BUG: Value truncated from {len(value)} to {max_length} characters. "
+                    f"Smart generation should have prevented this.",
                     extra={
+                        "masker": self.__class__.__name__,
                         "original_length": len(value),
                         "max_length": max_length,
-                        "data_type": column_info.data_type
+                        "data_type": column_info.data_type,
+                        "value_hash": self._hash_value(value)[:16]
                     }
                 )
                 value = truncated
@@ -304,6 +320,8 @@ class BaseMasker(ABC):
             # For VARCHAR/CHAR, count bytes
             value_bytes = value.encode('utf-8')
             if len(value_bytes) > max_length:
+                was_truncated = True
+                original_length = len(value_bytes)
                 # Truncate at byte boundary without breaking UTF-8
                 truncated_bytes = value_bytes[:max_length]
                 # Decode and handle potential broken UTF-8 at end
@@ -318,14 +336,25 @@ class BaseMasker(ABC):
                         except UnicodeDecodeError:
                             continue
                 
-                self.logger.warning(
-                    f"Truncated value from {len(value_bytes)} to {len(value.encode('utf-8'))} bytes",
+                # Log as ERROR - this should not happen with smart generation
+                self.logger.error(
+                    f"GENERATION BUG: Value truncated from {len(value_bytes)} to {len(value.encode('utf-8'))} bytes",
                     extra={
+                        "masker": self.__class__.__name__,
                         "original_bytes": len(value_bytes),
                         "max_length": max_length,
                         "data_type": column_info.data_type
                     }
                 )
+        
+        # Track truncation if it occurred
+        if was_truncated:
+            self.truncation_count += 1
+            self.truncation_details.append({
+                "original_length": original_length,
+                "truncated_length": max_length,
+                "data_type": column_info.data_type
+            })
         
         # For fixed-length columns (CHAR, NCHAR), pad with spaces
         if column_info.is_fixed_length:
@@ -339,7 +368,7 @@ class BaseMasker(ABC):
                     padding = b' ' * (max_length - len(value_bytes))
                     value = (value_bytes + padding).decode('utf-8')
         
-        return value
+        return value, was_truncated
     
     def _validate_data_type(
         self,
@@ -449,3 +478,106 @@ class BaseMasker(ABC):
             import random
             random.seed(self.seed)
             return None if random.random() < 0.5 else None  # 50/50, but still None for now
+    
+    def _pre_validate_constraints(
+        self,
+        column_info: ColumnInfo,
+        min_length_required: int
+    ) -> None:
+        """
+        Validate column constraints BEFORE generation.
+        
+        Checks that it's possible to generate a valid value given constraints.
+        Fails fast if constraints cannot be satisfied.
+        
+        Args:
+            column_info: Column metadata with constraints
+            min_length_required: Minimum length needed for this masker type
+            
+        Raises:
+            MaskingError: If constraints cannot be satisfied
+            
+        Example:
+            >>> # Email masker needs minimum 6 chars
+            >>> self._pre_validate_constraints(column_info, min_length_required=6)
+            >>> # Raises if column is VARCHAR(5)
+        """
+        max_length = column_info.effective_max_length
+        
+        # Check minimum length requirement
+        if max_length < min_length_required:
+            raise MaskingError(
+                message=f"Column too short for {self.__class__.__name__} "
+                        f"(need {min_length_required}, have {max_length})",
+                error_code=ErrorCodes.INSUFFICIENT_COLUMN_LENGTH,
+                is_retryable=False,
+                suggested_action=(
+                    f"Increase column length to at least {min_length_required} "
+                    f"or use GenericMasker for short columns"
+                ),
+                operation_context={
+                    "masker": self.__class__.__name__,
+                    "min_required": min_length_required,
+                    "column_length": max_length,
+                    "data_type": column_info.data_type
+                }
+            )
+        
+        # Check data type compatibility (string types only for most maskers)
+        if column_info.data_type not in {
+            "VARCHAR", "NVARCHAR", "CHAR", "NCHAR", "TEXT", "NTEXT"
+        }:
+            raise MaskingError(
+                message=f"Data type {column_info.data_type} incompatible with {self.__class__.__name__}",
+                error_code=ErrorCodes.INCOMPATIBLE_DATA_TYPE,
+                is_retryable=False,
+                suggested_action="Use appropriate masker for data type",
+                operation_context={
+                    "masker": self.__class__.__name__,
+                    "data_type": column_info.data_type
+                }
+            )
+        
+        self.logger.debug(
+            f"Pre-validation passed for {self.__class__.__name__}",
+            extra={
+                "min_required": min_length_required,
+                "available": max_length,
+                "data_type": column_info.data_type
+            }
+        )
+    
+    def get_truncation_metrics(self) -> dict[str, Any]:
+        """
+        Get truncation metrics for this masker instance.
+        
+        Returns:
+            Dict with truncation count and details
+            
+        Example:
+            >>> masker = EmailMasker()
+            >>> masker.mask("test@example.com", column_info)
+            >>> metrics = masker.get_truncation_metrics()
+            >>> print(metrics['truncation_count'])  # Should be 0 with smart generation
+        """
+        return {
+            "truncation_count": self.truncation_count,
+            "truncation_details": self.truncation_details
+        }
+    
+    def reset_truncation_metrics(self) -> None:
+        """
+        Reset truncation tracking counters.
+        
+        Should be called after retrieving metrics for each table/batch
+        to prevent accumulation across different operations.
+        
+        Example:
+            >>> masker = EmailMasker()
+            >>> # Process table 1
+            >>> metrics = masker.get_truncation_metrics()
+            >>> masker.reset_truncation_metrics()
+            >>> # Process table 2 with clean metrics
+        """
+        self.truncation_count = 0
+        self.truncation_details = []

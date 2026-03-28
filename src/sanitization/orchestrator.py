@@ -183,6 +183,8 @@ class SanitizationReport:
         table_progress: Details per-table progress tracking
         dry_run: Whether this was a dry-run execution
         checkpoint_saved: Whether checkpoint was saved
+        total_truncations: Total count of truncations (indicates smart generation bugs)
+        truncation_details: Per-table/column truncation details with counts
     """
     operation_id: str
     phase: ExecutionPhase
@@ -201,6 +203,8 @@ class SanitizationReport:
     checkpoint_saved: bool = False
     mappings_stored: int = 0
     mapping_errors: List[str] = field(default_factory=list)
+    total_truncations: int = 0
+    truncation_details: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
     
     @property
     def is_successful(self) -> bool:
@@ -220,6 +224,25 @@ class SanitizationReport:
         """Add a warning message."""
         self.warnings.append(warning)
     
+    def add_truncation(self, table_name: str, column: str, count: int, details: List[Dict[str, Any]]) -> None:
+        """Add truncation tracking for a table/column.
+        
+        Args:
+            table_name: Full table name (schema.table)
+            column: Column name where truncations occurred
+            count: Number of truncations
+            details: List of truncation detail dicts from masker
+        """
+        if table_name not in self.truncation_details:
+            self.truncation_details[table_name] = []
+        
+        self.truncation_details[table_name].append({
+            "column": column,
+            "count": count,
+            "details": details
+        })
+        self.total_truncations += count
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert report to dictionary."""
         return {
@@ -237,6 +260,8 @@ class SanitizationReport:
             "warnings": self.warnings,
             "dry_run": self.dry_run,
             "checkpoint_saved": self.checkpoint_saved,
+            "total_truncations": self.total_truncations,
+            "truncation_details": self.truncation_details,
             "table_progress": {
                 name: {
                     "schema": prog.schema,
@@ -343,6 +368,9 @@ class SanitizationOrchestrator:
         # Progress tracking
         self.progress_callback: Optional[ProgressCallback] = None
         self.table_callback: Optional[Callable[[str, str], None]] = None
+        
+        # Performance optimization settings (set during run from config)
+        self.log_batch_frequency: int = 10  # Log every Nth batch
     
     def set_progress_callback(self, callback: ProgressCallback) -> None:
         """
@@ -523,6 +551,26 @@ class SanitizationOrchestrator:
     
     def _initialize_components(self, config: SanitizationConfig) -> None:
         """Initialize all required components from configuration."""
+        # Load performance optimization settings from config
+        self.log_batch_frequency = config.database.log_batch_frequency
+        
+        # Auto-scale connection pool based on parallel processing settings
+        pool_size = config.database.pool_size
+        if config.database.enable_parallel_processing:
+            # Ensure pool size can support parallel workers + overhead
+            min_pool_size = config.database.max_parallel_tables + 2
+            if pool_size < min_pool_size:
+                self.logger.warning(
+                    f"Connection pool size ({pool_size}) is less than recommended for "
+                    f"parallel processing (min: {min_pool_size}). Auto-scaling to {min_pool_size}.",
+                    extra={
+                        "configured_pool_size": pool_size,
+                        "recommended_pool_size": min_pool_size,
+                        "max_parallel_tables": config.database.max_parallel_tables
+                    }
+                )
+                pool_size = min_pool_size
+        
         # Create connection manager if not provided
         if self.connection_manager is None:
             self.connection_manager = DatabaseConnectionManager(
@@ -534,7 +582,7 @@ class SanitizationOrchestrator:
                 timeout=config.database.timeout,
                 max_retries=config.database.max_retries,
                 retry_delay=config.database.retry_delay,
-                pool_size=config.database.pool_size
+                pool_size=pool_size  # Use auto-scaled pool size
             )
         
         # Initialize dependent components
@@ -547,7 +595,9 @@ class SanitizationOrchestrator:
         self.batch_updater = BatchUpdater(
             self.connection_manager,
             self.schema_extractor,
-            batch_size=config.database.batch_size
+            batch_size=config.database.batch_size,
+            bulk_update_strategy=config.database.bulk_update_strategy,
+            enable_fast_executemany=config.database.enable_fast_executemany
         )
         self.transaction_manager = TransactionManager(self.connection_manager)
         self.config_validator = ConfigValidator(self.schema_extractor)
@@ -699,6 +749,21 @@ class SanitizationOrchestrator:
         # Group PII columns by table
         pii_by_table = self._group_pii_columns_by_table(config.pii_columns)
         
+        # Auto-tune performance settings based on dataset size
+        total_rows = self._estimate_dataset_size(pii_by_table)
+        auto_settings = self._apply_auto_tuning(total_rows, len(pii_by_table))
+        
+        # Apply auto-tuning (user config always takes precedence)
+        if hasattr(config.database, 'bulk_update_strategy'):
+            # User explicitly set this, don't override
+            pass
+        else:
+            # Apply auto-tuning recommendation
+            if "bulk_update_strategy" in auto_settings and self.batch_updater:
+                self.batch_updater.bulk_update_strategy = auto_settings["bulk_update_strategy"]
+            if "log_batch_frequency" in auto_settings:
+                self.log_batch_frequency = auto_settings["log_batch_frequency"]
+        
         # Filter to only tables that have PII configured
         tables_to_process = [
             table for table in processing_order
@@ -718,7 +783,56 @@ class SanitizationOrchestrator:
         
         self.logger.info(f"Processing {len(tables_to_process)} tables with PII columns")
         
-        # Process each table
+        # Determine if parallel processing is enabled
+        enable_parallel = config.database.enable_parallel_processing
+        
+        if enable_parallel and len(tables_to_process) > 1:
+            # Use parallel processing with level-based groups
+            self.logger.info(
+                "Using parallel table processing",
+                extra={"max_parallel_tables": config.database.max_parallel_tables}
+            )
+            self._execute_parallel(
+                processing_order=tables_to_process,
+                pii_by_table=pii_by_table,
+                config=config,
+                report=report,
+                dry_run=dry_run
+            )
+        else:
+            # Use sequential processing (original behavior)
+            if not enable_parallel:
+                self.logger.info("Parallel processing disabled by configuration")
+            else:
+                self.logger.info("Only 1 table to process, using sequential mode")
+            
+            self._execute_sequential(
+                tables_to_process=tables_to_process,
+                pii_by_table=pii_by_table,
+                config=config,
+                report=report,
+                dry_run=dry_run
+            )
+        
+        self.logger.info(
+            f"Phase 3: Execution completed",
+            extra={
+                "tables_processed": report.tables_processed,
+                "tables_failed": report.tables_failed,
+                "tables_skipped": report.tables_skipped,
+                "rows_processed": report.rows_processed
+            }
+        )
+    
+    def _execute_sequential(
+        self,
+        tables_to_process: List[str],
+        pii_by_table: Dict[str, List[PIIColumnConfig]],
+        config: SanitizationConfig,
+        report: SanitizationReport,
+        dry_run: bool
+    ) -> None:
+        """Execute table processing sequentially (original behavior)."""
         for table_name in tables_to_process:
             try:
                 self._process_table(
@@ -739,16 +853,133 @@ class SanitizationOrchestrator:
                     extra={"table": table_name},
                     exc_info=True
                 )
+    
+    def _execute_parallel(
+        self,
+        processing_order: List[str],
+        pii_by_table: Dict[str, List[PIIColumnConfig]],
+        config: SanitizationConfig,
+        report: SanitizationReport,
+        dry_run: bool
+    ) -> None:
+        """
+        Execute table processing in parallel using level-based dependency groups.
+        
+        Tables within the same dependency level can be processed concurrently.
+        Levels are processed sequentially to respect FK constraints.
+        """
+        # Get level-based processing order from dependency resolver
+        processing_levels = self.dependency_resolver.get_processing_levels()
+        
+        # Filter to only tables that need processing
+        filtered_levels = []
+        for level in processing_levels:
+            filtered_level = [table for table in level if table in processing_order]
+            if filtered_level:
+                filtered_levels.append(filtered_level)
+        
+        # Determine worker count
+        max_workers = min(
+            config.database.max_parallel_tables,
+            self.connection_manager.config.pool_size,  # Don't exceed connection pool
+            os.cpu_count() or 4  # Fallback to 4 if cpu_count is None
+        )
         
         self.logger.info(
-            f"Phase 3: Execution completed",
+            f"Parallel processing with {len(filtered_levels)} dependency levels",
             extra={
-                "tables_processed": report.tables_processed,
-                "tables_failed": report.tables_failed,
-                "tables_skipped": report.tables_skipped,
-                "rows_processed": report.rows_processed
+                "level_count": len(filtered_levels),
+                "max_workers": max_workers,
+                "total_tables": sum(len(level) for level in filtered_levels)
             }
         )
+        
+        # Thread-safe report lock
+        report_lock = threading.Lock()
+        
+        # Process each level sequentially, but tables within level in parallel
+        for level_num, level_tables in enumerate(filtered_levels):
+            self.logger.info(
+                f"Processing dependency level {level_num}: {len(level_tables)} tables",
+                extra={
+                    "level": level_num,
+                    "table_count": len(level_tables),
+                    "tables": level_tables
+                }
+            )
+            
+            # Use ThreadPoolExecutor for parallel table processing within this level
+            with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=f"Level{level_num}") as executor:
+                # Submit all tables in this level
+                future_to_table = {
+                    executor.submit(
+                        self._process_table_safe,
+                        table_name=table,
+                        pii_columns=pii_by_table[table],
+                        config=config,
+                        report=report,
+                        report_lock=report_lock,
+                        dry_run=dry_run
+                    ): table for table in level_tables
+                }
+                
+                # Wait for all tables in this level to complete
+                for future in as_completed(future_to_table):
+                    table_name = future_to_table[future]
+                    try:
+                        future.result()  # Raises exception if table processing failed
+                        self.logger.debug(
+                            f"Table {table_name} completed successfully",
+                            extra={"table": table_name, "level": level_num}
+                        )
+                    except Exception as e:
+                        # Error already logged in _process_table_safe
+                        self.logger.warning(
+                            f"Table {table_name} failed in parallel execution",
+                            extra={"table": table_name, "level": level_num, "error": str(e)}
+                        )
+            
+            self.logger.info(
+                f"Dependency level {level_num} completed",
+                extra={"level": level_num}
+            )
+    
+    def _process_table_safe(
+        self,
+        table_name: str,
+        pii_columns: List[PIIColumnConfig],
+        config: SanitizationConfig,
+        report: SanitizationReport,
+        report_lock: threading.Lock,
+        dry_run: bool
+    ) -> None:
+        """
+        Thread-safe wrapper for _process_table.
+        
+        Handles thread-safe report updates and error logging.
+        """
+        try:
+            self._process_table(
+                table_name=table_name,
+                pii_columns=pii_columns,
+                config=config,
+                report=report,
+                dry_run=dry_run
+            )
+        except Exception as e:
+            # Thread-safe error reporting
+            with report_lock:
+                error_msg = f"Table {table_name} failed: {str(e)}"
+                report.add_error(error_msg)
+                report.tables_failed += 1
+            
+            self.logger.error(
+                f"Table {table_name} processing failed",
+                extra={"table": table_name},
+                exc_info=True
+            )
+            # Re-raise to signal failure to executor
+            raise
     
     def _phase_verification(self, config: SanitizationConfig, report: SanitizationReport) -> None:
         """
@@ -896,6 +1127,39 @@ class SanitizationOrchestrator:
                     dry_run=dry_run
                 )
             
+            # Collect truncation metrics from all maskers
+            for column_name, masker in maskers.items():
+                if hasattr(masker, 'get_truncation_metrics'):
+                    truncation_count, truncation_details = masker.get_truncation_metrics()
+                    
+                    if truncation_count > 0:
+                        # Log warning - truncations indicate smart generation bugs
+                        warning_msg = (
+                            f"⚠️ TRUNCATION WARNING: {truncation_count} truncations detected in "
+                            f"{table_name}.{column_name}. This indicates a bug in smart generation logic."
+                        )
+                        report.add_warning(warning_msg)
+                        self.logger.error(
+                            warning_msg,
+                            extra={
+                                "table": table_name,
+                                "column": column_name,
+                                "truncation_count": truncation_count,
+                                "truncation_details": truncation_details
+                            }
+                        )
+                        
+                        # Add to report truncation tracking
+                        report.add_truncation(
+                            table_name=table_name,
+                            column=column_name,
+                            count=truncation_count,
+                            details=truncation_details
+                        )
+                    
+                    # Reset metrics for next table (even if zero, for consistency)
+                    masker.reset_truncation_metrics()
+            
             # Mark table as completed
             progress.completed_at = datetime.utcnow()
             progress.rows_processed = rows_processed
@@ -1002,14 +1266,16 @@ class SanitizationOrchestrator:
                     try:
                         self.mapping_manager.store_mappings(mapping_entries)
                         report.mappings_stored += len(mapping_entries)
-                        self.logger.debug(
-                            f"Stored {len(mapping_entries)} mapping entries for batch",
-                            extra={
-                                "table": table_name,
-                                "batch": batch_count,
-                                "entries": len(mapping_entries)
-                            }
-                        )
+                        # Only log every Nth batch to reduce overhead
+                        if batch_count % self.log_batch_frequency == 0:
+                            self.logger.info(
+                                f"Stored {len(mapping_entries)} mapping entries (batch {batch_count})",
+                                extra={
+                                    "table": table_name,
+                                    "batch": batch_count,
+                                    "entries": len(mapping_entries)
+                                }
+                            )
                     except MappingError as e:
                         error_msg = f"Failed to store mappings for {table_name} batch {batch_count}: {e.message}"
                         report.mapping_errors.append(error_msg)
@@ -1199,10 +1465,106 @@ class SanitizationOrchestrator:
         return column_infos
     
     def _get_table_row_count(self, schema: str, table: str) -> int:
-        """Get total row count for a table."""
-        query = f"SELECT COUNT(*) as row_count FROM [{schema}].[{table}]"
-        result = self.connection_manager.execute_query(query)
-        return result[0]["row_count"] if result else 0
+        """Get total row count for a table (fast method using sys.partitions)."""
+        # Use sys.partitions for fast estimation (avoids table scan)
+        query = """
+            SELECT SUM(p.rows) as row_count
+            FROM sys.partitions p
+            INNER JOIN sys.objects o ON p.object_id = o.object_id
+            INNER JOIN sys.schemas s ON o.schema_id = s.schema_id
+            WHERE s.name = ? AND o.name = ?
+                AND p.index_id IN (0, 1)  -- Heap or clustered index
+        """
+        try:
+            result = self.connection_manager.execute_query(query, params=(schema, table))
+            count = result[0]["row_count"] if result and result[0]["row_count"] else 0
+            return int(count)
+        except:
+            # Fallback to COUNT(*) if sys.partitions fails
+            fallback_query = f"SELECT COUNT(*) as row_count FROM [{schema}].[{table}]"
+            result = self.connection_manager.execute_query(fallback_query)
+            return result[0]["row_count"] if result else 0
+    
+    def _estimate_dataset_size(
+        self,
+        pii_by_table: Dict[str, List[PIIColumnConfig]]
+    ) -> int:
+        """
+        Estimate total rows across all tables to be sanitized.
+        
+        Args:
+            pii_by_table: Dictionary mapping table names to PII columns
+        
+        Returns:
+            Estimated total row count
+        """
+        total_rows = 0
+        for table_name in pii_by_table.keys():
+            schema, table = self._parse_table_name(table_name)
+            try:
+                table_rows = self._get_table_row_count(schema, table)
+                total_rows += table_rows
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to estimate row count for {table_name}: {e}",
+                    extra={"table": table_name}
+                )
+        return total_rows
+    
+    def _apply_auto_tuning(
+        self,
+        total_rows: int,
+        table_count: int
+    ) -> Dict[str, Any]:
+        """
+        Auto-tune performance settings based on dataset size.
+        
+        Args:
+            total_rows: Total rows across all tables
+            table_count: Number of tables
+        
+        Returns:
+            Dictionary of recommended settings
+        """
+        settings = {}
+        
+        # Tiny dataset: < 1000 rows
+        if total_rows < 1000:
+            settings["bulk_update_strategy"] = "parameter"  # MERGE overhead too high
+            settings["log_batch_frequency"] = 1  # Log all batches
+            self.logger.info(
+                f"Auto-tuning: Tiny dataset ({total_rows} rows) - using parameter updates",
+                extra={"total_rows": total_rows, "table_count": table_count}
+            )
+        
+        # Medium dataset: 1K - 100K rows
+        elif total_rows < 100000:
+            settings["bulk_update_strategy"] = "auto"  # Try MERGE, fallback if needed
+            settings["log_batch_frequency"] = 5
+            self.logger.info(
+                f"Auto-tuning: Medium dataset ({total_rows} rows) - using auto MERGE strategy",
+                extra={"total_rows": total_rows, "table_count": table_count}
+            )
+        
+        # Large dataset: 100K - 1M rows
+        elif total_rows < 1000000:
+            settings["bulk_update_strategy"] = "merge"  # Force MERGE
+            settings["log_batch_frequency"] = 10
+            self.logger.info(
+                f"Auto-tuning: Large dataset ({total_rows} rows) - using MERGE strategy",
+                extra={"total_rows": total_rows, "table_count": table_count}
+            )
+        
+        # Very large dataset: > 1M rows
+        else:
+            settings["bulk_update_strategy"] = "merge"  # Force MERGE
+            settings["log_batch_frequency"] = 20  # Reduce logging overhead
+            self.logger.info(
+                f"Auto-tuning: Very large dataset ({total_rows} rows) - using aggressive MERGE strategy",
+                extra={"total_rows": total_rows, "table_count": table_count}
+            )
+        
+        return settings
     
     def _parse_table_name(self, table_name: str) -> tuple[str, str]:
         """

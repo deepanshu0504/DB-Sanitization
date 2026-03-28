@@ -4,6 +4,17 @@ Bypasses framework logger to avoid hanging issues.
 Performs actual PII masking with mapping table support for FK relationships.
 """
 
+import sys
+import os
+
+# Force UTF-8 encoding for console output on Windows
+if sys.platform == 'win32':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except:
+        pass  # Python < 3.7 doesn't support reconfigure
+
 import json
 import pyodbc
 import random
@@ -510,8 +521,8 @@ if __name__ == "__main__":
     try:
         # Ask for backup confirmation
         print()
-        print("⚠️  WARNING: This will MODIFY your database!")
-        print("⚠️  All PII data will be replaced with fake data!")
+        print("WARNING: This will MODIFY your database!")
+        print("WARNING: All PII data will be replaced with fake data!")
         print()
         
         backup_needed = input("Do you want to be prompted for backup confirmation? (yes/no): ")

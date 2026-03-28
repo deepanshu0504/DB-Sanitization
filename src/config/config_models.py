@@ -153,6 +153,21 @@ class DatabaseConfig(BaseModel):
     environment: Environment = Field(
         Environment.DEV, description="Deployment environment"
     )
+    log_batch_frequency: int = Field(
+        10, ge=1, le=1000, description="Log every Nth batch (1=all batches, 10=every 10th batch)"
+    )
+    bulk_update_strategy: Literal["auto", "merge", "parameter"] = Field(
+        "auto", description="Bulk update strategy: auto (try merge, fallback to parameter), merge (force merge), parameter (parameterized updates)"
+    )
+    enable_fast_executemany: bool = Field(
+        True, description="Enable pyodbc fast_executemany for bulk operations (SQL Server 2016+)"
+    )
+    enable_parallel_processing: bool = Field(
+        True, description="Enable parallel table processing for independent tables"
+    )
+    max_parallel_tables: int = Field(
+        4, ge=1, le=16, description="Maximum number of tables to process in parallel"
+    )
     
     @model_validator(mode="after")
     def validate_auth_credentials(self) -> "DatabaseConfig":

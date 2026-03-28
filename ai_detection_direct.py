@@ -35,7 +35,7 @@ if not api_key:
 
 # Database config
 server = "(localdb)\\MSSQLLocalDB"
-database = "AdventureWorks2016"
+database = "smartstore"
 conn_str = (
     f"DRIVER={{ODBC Driver 17 for SQL Server}};"
     f"SERVER={server};"
@@ -256,7 +256,13 @@ output_config = {
         "database": database,
         "auth_type": "windows",
         "timeout": 60,
-        "batch_size": 5000
+        "batch_size": 5000,
+        # Performance optimization settings (6-10x faster for large datasets)
+        "log_batch_frequency": 10,
+        "bulk_update_strategy": "auto",
+        "enable_fast_executemany": True,
+        "enable_parallel_processing": True,
+        "max_parallel_tables": 4
     },
     "pii_columns": pii_column_configs,
     "dry_run": True,

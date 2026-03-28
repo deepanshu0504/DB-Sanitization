@@ -252,6 +252,23 @@ def example_report_analysis():
     print(f"  Values masked: {report.rows_masked:,}")
     print(f"  Duration: {report.duration_ms / 1000:.1f} seconds")
     
+    # Display truncation warnings (should be zero with smart generation)
+    print(f"\nTruncation Status:")
+    if report.total_truncations == 0:
+        print(f"  ✅ No truncations detected (smart generation working correctly)")
+    else:
+        print(f"  ⚠️ {report.total_truncations} truncations detected - indicates smart generation bug!")
+        print(f"\n  Truncation Details:")
+        for table_name, table_truncations in report.truncation_details.items():
+            print(f"    Table: {table_name}")
+            for trunc in table_truncations:
+                print(f"      Column: {trunc['column']}, Count: {trunc['count']}")
+                # Show first few examples
+                for detail in trunc['details'][:3]:
+                    print(f"        - {detail}")
+                if len(trunc['details']) > 3:
+                    print(f"        ... and {len(trunc['details']) - 3} more")
+    
     # Serialize to dict for logging/storage
     report_dict = report.to_dict()
     print(f"\n✓ Report can be serialized to JSON:")

@@ -97,9 +97,10 @@ cursor.execute("""
 
 db_columns = {}
 for row in cursor.fetchall():
-    key = f"{row.TABLE_SCHEMA}.{row.TABLE_NAME}.{row.COLUMN_NAME}"
+    # Use lowercase keys for case-insensitive comparison
+    key = f"{row.TABLE_SCHEMA}.{row.TABLE_NAME}.{row.COLUMN_NAME}".lower()
     db_columns[key] = {
-        "schema": row.TABLE_SCHEMA,
+        "schema": row.TABLE_SCHEMA,  # Preserve original case for display
         "table": row.TABLE_NAME,
         "column": row.COLUMN_NAME,
         "data_type": row.DATA_TYPE,
@@ -126,11 +127,13 @@ for pii_col in pii_columns:
     pii_type = pii_col['pii_type']
     nullable = pii_col.get('nullable', True)
     
-    key = f"{schema}.{table}.{column}"
+    # Use lowercase key for case-insensitive lookup
+    key = f"{schema}.{table}.{column}".lower()
+    display_key = f"{schema}.{table}.{column}"  # Preserve case for display
     
-    # Check if column exists
+    # Check if column exists (case-insensitive)
     if key not in db_columns:
-        errors.append(f"Column not found in database: {key}")
+        errors.append(f"Column not found in database: {display_key}")
         continue
     
     db_col = db_columns[key]
@@ -150,31 +153,31 @@ for pii_col in pii_columns:
     compatible_types = type_compatibility.get(pii_type, [])
     if data_type not in compatible_types:
         errors.append(
-            f"{key}: Data type '{data_type}' incompatible with PII type '{pii_type}'. "
+            f"{display_key}: Data type '{data_type}' incompatible with PII type '{pii_type}'. "
             f"Expected one of: {', '.join(compatible_types)}"
         )
     
     # Check nullable mismatch
     if nullable != db_col['nullable']:
         warnings.append(
-            f"{key}: Config nullable={nullable} but database IS_NULLABLE={db_col['nullable']}"
+            f"{display_key}: Config nullable={nullable} but database IS_NULLABLE={db_col['nullable']}"
         )
     
     # Warn if PII column is a primary key
     if db_col['is_pk']:
         warnings.append(
-            f"{key}: Column is part of PRIMARY KEY - sanitizing may break referential integrity!"
+            f"{display_key}: Column is part of PRIMARY KEY - sanitizing may break referential integrity!"
         )
     
     # Warn if PII column is a foreign key
     if db_col['is_fk']:
         warnings.append(
-            f"{key}: Column is part of FOREIGN KEY - sanitizing may break relationships!"
+            f"{display_key}: Column is part of FOREIGN KEY - sanitizing may break relationships!"
         )
     
     # Info: column validated successfully
     if key in db_columns and data_type in compatible_types:
-        info.append(f"{key}: OK ({data_type}, nullable={db_col['nullable']})")
+        info.append(f"{display_key}: OK ({data_type}, nullable={db_col['nullable']})")
 
 # Display results
 print("\n" + "=" * 70)
