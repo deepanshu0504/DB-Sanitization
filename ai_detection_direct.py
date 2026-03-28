@@ -33,9 +33,24 @@ if not api_key:
     logger.error("\nNo API key found in environment")
     sys.exit(1)
 
-# Database config
-server = "(localdb)\\MSSQLLocalDB"
-database = "smartstore"
+# Database config - read from environment variables (required)
+server = os.getenv("SQLSERVER_HOST")
+database = os.getenv("SQLSERVER_DB")
+
+if not server:
+    logger.error("\nSQLSERVER_HOST environment variable not set")
+    logger.error("Please set it in .env file or environment")
+    sys.exit(1)
+
+if not database:
+    logger.error("\nSQLSERVER_DB environment variable not set")
+    logger.error("Please set it in .env file or environment")
+    sys.exit(1)
+
+logger.info(f"\n[Configuration]")
+logger.info(f"  Server: {server}")
+logger.info(f"  Database: {database}")
+
 conn_str = (
     f"DRIVER={{ODBC Driver 17 for SQL Server}};"
     f"SERVER={server};"
@@ -115,7 +130,41 @@ if len(tables) > 5:
 
 # Build efficient prompt using markdown tables instead of verbose JSON
 total_columns = sum(len(table['columns']) for table in tables)
+logger.info(f"   + Total columns to analyze: {total_columns}")
 
+# Calculate batch size to avoid token limit (8000 tokens for gpt-4o)
+# Rough estimate: ~50 chars per column = ~15 tokens per column
+# Safe limit: ~400 columns per batch = ~6000 tokens (leaving room for system prompt + response)
+COLUMNS_PER_BATCH = 400
+table_batches = []
+current_batch = []
+current_column_count = 0
+
+logger.info(f"\n   + Creating batches (max {COLUMNS_PER_BATCH} columns per batch)...")
+
+for table in tables:
+    table_column_count = len(table['columns'])
+    
+    # If adding this table exceeds batch size, start new batch
+    if current_column_count + table_column_count > COLUMNS_PER_BATCH and current_batch:
+        table_batches.append(current_batch)
+        current_batch = [table]
+        current_column_count = table_column_count
+    else:
+        current_batch.append(table)
+        current_column_count += table_column_count
+
+# Add final batch
+if current_batch:
+    table_batches.append(current_batch)
+
+logger.info(f"   + Split into {len(table_batches)} batches:")
+for i, batch in enumerate(table_batches, 1):
+    batch_cols = sum(len(t['columns']) for t in batch)
+    batch_tables = len(batch)
+    logger.info(f"     - Batch {i}: {batch_tables} tables, {batch_cols} columns")
+
+# System prompt for AI
 system_prompt = """You are a database security expert specializing in identifying PII (Personally Identifiable Information) in database schemas.
 
 Analyze the provided database schema and identify all columns that likely contain PII data.
@@ -134,28 +183,41 @@ Return ONLY a JSON array of objects with this structure:
 Example:
 [{"schema": "dbo", "table": "users", "column": "email", "pii_type": "email", "reason": "Contains email addresses"}]"""
 
-user_prompt = f"""# Database PII Detection Analysis
+# Process tables in batches to avoid token limit
+all_pii_columns = []
+
+logger.info("\n3. Calling AI API in batches...")
+logger.info(f"   + Endpoint: https://models.github.ai/inference/chat/completions")
+logger.info(f"   + Model: gpt-4o (8000 token limit)")
+
+for batch_num, batch_tables in enumerate(table_batches, 1):
+    logger.info(f"\n   [Batch {batch_num}/{len(table_batches)}]")
+    
+    batch_columns = sum(len(t['columns']) for t in batch_tables)
+    logger.info(f"   + Tables: {len(batch_tables)}, Columns: {batch_columns}")
+    
+    user_prompt = f"""# Database PII Detection Analysis (Batch {batch_num}/{len(table_batches)})
 
 **Database**: {database} (Microsoft SQL Server)
-**Tables**: {len(tables)} | **Columns**: {total_columns}
+**Tables in batch**: {len(batch_tables)} | **Columns**: {batch_columns}
 
 ## Schema Details
 """
-
-# Add schema information using compact markdown format
-for table in tables:
-    user_prompt += f"\n**Table: {table['schema']}.{table['name']}**\n"
-    user_prompt += "| Column | Type | Length | Nullable |\n|--------|------|--------|----------|\n"
     
-    for col in table['columns']:
-        data_type = col['data_type']
-        max_length = col['max_length'] if col['max_length'] else 'N/A'
-        nullable = 'Yes' if col['nullable'] else 'No'
-        user_prompt += f"| {col['name']} | {data_type} | {max_length} | {nullable} |\n"
+    # Add schema information using compact markdown format
+    for table in batch_tables:
+        user_prompt += f"\n**Table: {table['schema']}.{table['name']}**\n"
+        user_prompt += "| Column | Type | Length | Nullable |\n|--------|------|--------|----------|\n"
+        
+        for col in table['columns']:
+            data_type = col['data_type']
+            max_length = col['max_length'] if col['max_length'] else 'N/A'
+            nullable = 'Yes' if col['nullable'] else 'No'
+            user_prompt += f"| {col['name']} | {data_type} | {max_length} | {nullable} |\n"
+        
+        user_prompt += "\n"
     
-    user_prompt += "\n"
-
-user_prompt += """
+    user_prompt += """
 ## Task
 Identify PII columns based on:
 - Column names (primary indicator)
@@ -166,74 +228,95 @@ Focus on finding: emails, phones, names, addresses, SSNs, and other sensitive id
 
 Respond with JSON array only, no additional text.
 """
-
-logger.info("\n3. Calling AI API...")
-logger.info(f"   + Endpoint: https://models.github.ai/inference/chat/completions")
-logger.info(f"   + Model: gpt-4o")
-logger.info(f"   + Prompt size: {len(user_prompt)} chars (reduced from JSON format)")
-
-# Make API call
-payload = {
-    "model": "gpt-4o",
-    "messages": [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt}
-    ],
-    "temperature": 0.0,
-    "max_tokens": 4000
-}
-
-headers = {
-    "Content-Type": "application/json",
-    "Authorization": f"Bearer {api_key}"
-}
-
-logger.info("   + Sending request (60s timeout)...")
-response = requests.post(
-    "https://models.github.ai/inference/chat/completions",
-    json=payload,
-    headers=headers,
-    timeout=60
-)
-
-logger.info(f"   + Response status: {response.status_code}")
-
-if response.status_code != 200:
-    logger.error(f"API Error: {response.text}")
-    sys.exit(1)
-
-# Parse response
-data = response.json()
-content = data['choices'][0]['message']['content']
-
-logger.info(f"   + AI response received ({len(content)} chars)")
-
-# Extract JSON from response (might be wrapped in markdown code blocks)
-import re
-json_match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', content, re.DOTALL)
-if json_match:
-    content = json_match.group(1)
-elif not content.strip().startswith('['):
-    # Try to find JSON array
-    json_match = re.search(r'(\[.*\])', content, re.DOTALL)
-    if json_match:
-        content = json_match.group(1)
-
-# Parse PII columns
-try:
-    pii_columns = json.loads(content)
-    logger.info(f"\n4. PII Detection Results:")
-    logger.info(f"   + Found {len(pii_columns)} PII columns")
     
-    for col in pii_columns:
+    logger.info(f"   + Prompt size: {len(user_prompt)} chars")
+    
+    # Make API call
+    payload = {
+        "model": "gpt-4o",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.0,
+        "max_tokens": 4000
+    }
+    
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+    
+    logger.info(f"   + Sending request...")
+    try:
+        response = requests.post(
+            "https://models.github.ai/inference/chat/completions",
+            json=payload,
+            headers=headers,
+            timeout=60
+        )
+        
+        logger.info(f"   + Response status: {response.status_code}")
+        
+        if response.status_code != 200:
+            logger.error(f"   ! API Error: {response.text}")
+            logger.warning(f"   ! Skipping batch {batch_num}")
+            continue
+        
+        # Parse response
+        data = response.json()
+        content = data['choices'][0]['message']['content']
+        
+        logger.info(f"   + AI response received ({len(content)} chars)")
+        
+        # Extract JSON from response (might be wrapped in markdown code blocks)
+        import re
+        json_match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', content, re.DOTALL)
+        if json_match:
+            content = json_match.group(1)
+        elif not content.strip().startswith('['):
+            # Try to find JSON array
+            json_match = re.search(r'(\[.*\])', content, re.DOTALL)
+            if json_match:
+                content = json_match.group(1)
+        
+        # Parse PII columns from this batch
+        try:
+            batch_pii_columns = json.loads(content)
+            logger.info(f"   + Found {len(batch_pii_columns)} PII columns in this batch")
+            all_pii_columns.extend(batch_pii_columns)
+        except json.JSONDecodeError as e:
+            logger.error(f"   ! Failed to parse AI response as JSON:")
+            logger.error(f"   ! Content: {content[:500]}")
+            logger.warning(f"   ! Skipping batch {batch_num}")
+            continue
+            
+    except Exception as e:
+        logger.error(f"   ! Request failed: {e}")
+        logger.warning(f"   ! Skipping batch {batch_num}")
+        continue
+
+# Display results
+logger.info("\n" + "=" * 70)
+logger.info("4. Combined PII Detection Results")
+logger.info("=" * 70)
+logger.info(f"\n   + Total PII columns found: {len(all_pii_columns)}")
+logger.info(f"   + Across {len(tables)} tables")
+
+if all_pii_columns:
+    logger.info("\n   Detected PII Columns:")
+    for col in all_pii_columns:
         logger.info(f"\n   - {col['schema']}.{col['table']}.{col['column']}")
         logger.info(f"     Type: {col['pii_type']}")
         logger.info(f"     Reason: {col['reason']}")
-        
-except json.JSONDecodeError as e:
-    logger.error(f"\nFailed to parse AI response as JSON:")
-    logger.error(f"Content: {content[:500]}")
-    sys.exit(1)
+else:
+    logger.warning("\n   ! No PII columns detected")
+    logger.info("   This could mean:")
+    logger.info("     - Database has no PII")
+    logger.info("     - All batches failed")
+    logger.info("     - AI couldn't identify PII patterns")
+
+pii_columns = all_pii_columns  # For compatibility with rest of script
 
 # Save to config file
 output_path = Path("config/pii_config_ai_generated.json")
