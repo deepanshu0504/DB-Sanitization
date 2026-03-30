@@ -147,6 +147,7 @@ for pii_col in pii_columns:
         'name': ['varchar', 'nvarchar', 'char', 'nchar', 'text', 'ntext'],
         'ssn': ['varchar', 'nvarchar', 'char', 'nchar'],
         'address': ['varchar', 'nvarchar', 'text', 'ntext'],
+        'date_of_birth': ['date', 'datetime', 'datetime2', 'smalldatetime', 'varchar', 'nvarchar'],
         'generic': ['varchar', 'nvarchar', 'char', 'nchar', 'text', 'ntext']
     }
     

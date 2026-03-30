@@ -55,6 +55,7 @@ class SimpleMasker:
             'phone': self.mask_phone,
             'ssn': self.mask_ssn,
             'address': self.mask_address,
+            'date_of_birth': self.mask_date_of_birth, 
             'generic': self.mask_generic,
         }
         

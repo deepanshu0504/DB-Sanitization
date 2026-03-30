@@ -21,6 +21,9 @@ from .phone_masker import PhoneMasker
 from .name_masker import NameMasker
 from .ssn_masker import SSNMasker
 from .generic_masker import GenericMasker
+from .address_masker import AddressMasker
+from .credit_card_masker import CreditCardMasker
+from .date_of_birth_masker import DateOfBirthMasker
 from .masker_factory import MaskerFactory
 
 __all__ = [
@@ -32,5 +35,8 @@ __all__ = [
     "NameMasker",
     "SSNMasker",
     "GenericMasker",
+    "AddressMasker",
+    "CreditCardMasker",
+    "DateOfBirthMasker",
     "MaskerFactory",
 ]

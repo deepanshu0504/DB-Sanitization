@@ -23,8 +23,8 @@ import pyodbc
 import hashlib
 import random
 import string
-from typing import Dict, List, Any, Optional, Tuple
-from datetime import datetime
+from typing import Dict, List, Any, Optional, Tuple, Union
+from datetime import datetime, date, timedelta
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -188,6 +188,90 @@ class SmartMaskerEngine:
         chars = string.ascii_letters + string.digits
         return ''.join(random.choices(chars, k=target_length))
     
+    def _generate_date_of_birth_smart(
+        self, 
+        seed: int, 
+        max_length: Optional[int], 
+        data_type: str,
+        min_age: int = 18,
+        max_age: int = 80
+    ) -> Union[date, datetime, str]:
+        """
+        Smart Generation for date of birth - age-based date generation.
+        
+        Generates realistic birth dates within age range (default: 18-80 years).
+        Returns appropriate type based on column data type:
+        - DATE: returns date object
+        - DATETIME/DATETIME2/SMALLDATETIME: returns datetime object
+        - VARCHAR/NVARCHAR: returns formatted string
+        
+        Args:
+            seed: Deterministic seed for generation
+            max_length: Maximum length for VARCHAR columns
+            data_type: SQL column data type
+            min_age: Minimum age in years (default: 18)
+            max_age: Maximum age in years (default: 80)
+        
+        Returns:
+            Birth date as date, datetime, or string depending on data_type
+        """
+        data_type_upper = data_type.upper()
+        
+        # Validate length for VARCHAR types
+        if data_type_upper in ("VARCHAR", "NVARCHAR", "CHAR", "NCHAR"):
+            if max_length is None or max_length < 4:
+                raise ValueError(
+                    f"Column length {max_length} is too short for date of birth. "
+                    f"Minimum required: 4 characters (year only format)"
+                )
+        
+        # Get current date
+        today = date.today()
+        
+        # Calculate age deterministically within range
+        age_range = max_age - min_age + 1
+        age = min_age + (seed % age_range)
+        
+        # Calculate birth year
+        birth_year = today.year - age
+        
+        # Add day-level variation within the year (use upper bits of seed)
+        day_offset = (seed >> 16) % 365
+        
+        # Start from Jan 1 of birth year
+        try:
+            base_date = date(birth_year, 1, 1)
+            birth_date = base_date + timedelta(days=day_offset)
+            
+            # Ensure date is not in future
+            if birth_date > today:
+                birth_date = today - timedelta(days=365 * age)
+        except (ValueError, OverflowError):
+            # Fallback to Jan 1 if date calculation fails
+            birth_date = date(birth_year, 1, 1)
+        
+        # Return appropriate type based on data_type
+        if data_type_upper == "DATE":
+            return birth_date
+        elif data_type_upper in ("DATETIME", "DATETIME2", "SMALLDATETIME"):
+            return datetime.combine(birth_date, datetime.min.time())
+        elif data_type_upper in ("VARCHAR", "NVARCHAR", "CHAR", "NCHAR"):
+            # Format based on length
+            if max_length >= 10:
+                # ISO 8601 format: YYYY-MM-DD (10 chars)
+                return birth_date.strftime("%Y-%m-%d")
+            elif max_length >= 8:
+                # Compact format: YYYYMMDD (8 chars)
+                return birth_date.strftime("%Y%m%d")
+            else:
+                # Year only: YYYY (4 chars)
+                return str(birth_date.year)
+        else:
+            raise ValueError(
+                f"Unsupported data type for date of birth: {data_type}. "
+                f"Supported types: DATE, DATETIME, DATETIME2, SMALLDATETIME, VARCHAR, NVARCHAR"
+            )
+    
     def _generate_address_smart(self, seed: int, max_length: int, component_type: str = "full") -> str:
         """
         Smart Generation for addresses - adapts to column length.
@@ -294,6 +378,11 @@ class SmartMaskerEngine:
             elif pii_type == 'address':
                 # Use generic address format
                 masked_value = self._generate_address_smart(seed, max_length, "full")
+            elif pii_type == 'date_of_birth':
+                # Generate date with age range 18-80 years
+                masked_value = self._generate_date_of_birth_smart(
+                    seed, max_length, column_info.data_type
+                )
             else:  # generic and any other type
                 masked_value = self._generate_generic_smart(original, max_length)
         except ValueError as e:
@@ -606,6 +695,7 @@ def main():
         print(f"  [OK] NameMasker: 4 format tiers (2-20 chars)")
         print(f"  [OK] SSNMasker: 2 format tiers (9-11 chars)")
         print(f"  [OK] AddressMasker: Smart length adaptation")
+        print(f"  [OK] DateOfBirthMasker: Age range 18-80 years, 4 format tiers")
         print(f"  [OK] GenericMasker: Exact length generation")
     except Exception as e:
         print(f"  [ERR] Initialization failed: {e}")

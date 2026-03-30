@@ -57,7 +57,7 @@ class ConfigValidator:
         "name": {"VARCHAR", "NVARCHAR", "TEXT", "NTEXT"},
         "ssn": {"VARCHAR", "NVARCHAR", "CHAR", "NCHAR"},
         "generic": {"VARCHAR", "NVARCHAR", "TEXT", "NTEXT", "CHAR", "NCHAR"},
-        "address": {"VARCHAR", "NVARCHAR", "TEXT", "NTEXT"},
+        "address": {"VARCHAR", "NVARCHAR", "TEXT", "NTEXT", "CHAR", "NCHAR"},
         "credit_card": {"VARCHAR", "NVARCHAR", "CHAR", "NCHAR"},
         "date_of_birth": {"DATE", "DATETIME", "DATETIME2", "SMALLDATETIME", "VARCHAR", "NVARCHAR"},
         "ip_address": {"VARCHAR", "NVARCHAR", "CHAR", "NCHAR"},
@@ -70,6 +70,8 @@ class ConfigValidator:
         "phone": 10,  # US: (555)123-4567 or 5551234567
         "ssn": 11,  # XXX-XX-XXXX format
         "credit_card": 13,  # Minimum credit card length
+        "address": 10,  # 123 Oak St (minimum viable address)
+        "date_of_birth": 4,  # YYYY (year only format)
         "ip_address": 7,  # 0.0.0.0
         "name": 2,  # Minimum 2 chars for single letter names (e.g., "Li", "Wu")
     }

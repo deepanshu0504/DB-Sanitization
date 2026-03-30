@@ -51,6 +51,9 @@ from src.masking.phone_masker import PhoneMasker
 from src.masking.name_masker import NameMasker
 from src.masking.ssn_masker import SSNMasker
 from src.masking.generic_masker import GenericMasker
+from src.masking.address_masker import AddressMasker
+from src.masking.credit_card_masker import CreditCardMasker
+from src.masking.date_of_birth_masker import DateOfBirthMasker
 from src.exceptions import MaskingError
 from src.logging.logger import get_logger
 
@@ -95,6 +98,9 @@ class MaskerFactory:
         "name": NameMasker,
         "ssn": SSNMasker,
         "generic": GenericMasker,
+        "address": AddressMasker,
+        "credit_card": CreditCardMasker,
+        "date_of_birth": DateOfBirthMasker,
     }
     
     def __new__(cls) -> "MaskerFactory":
@@ -269,6 +275,14 @@ class MaskerFactory:
                 character_class = masker_params.get("character_class", "alphanumeric")
                 masker_kwargs["character_class"] = character_class
             # If masker_params is not a dict (e.g., legacy string format), ignore it
+        
+        # Handle DateOfBirthMasker's min_age and max_age parameters
+        if pii_type == "date_of_birth" and masker_params:
+            if isinstance(masker_params, dict):
+                min_age = masker_params.get("min_age", 18)  # Default: 18 years
+                max_age = masker_params.get("max_age", 80)  # Default: 80 years
+                masker_kwargs["min_age"] = min_age
+                masker_kwargs["max_age"] = max_age
         
         # Future maskers can add their specific parameters here
         # if pii_type == "custom_type" and masker_params:

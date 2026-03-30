@@ -54,6 +54,15 @@ class SimpleMasker:
         return f"{numbers} {random.choice(streets)}, {random.choice(cities)}, {random.choice(states)} {zip_code}"
     
     @staticmethod
+    def mask_date_of_birth(original: str) -> str:
+        """Generate fake date of birth."""
+        # Simple date generation for preview (1970-2000 range)
+        year = random.randint(1970, 2000)
+        month = random.randint(1, 12)
+        day = random.randint(1, 28)  # Safe day range for all months
+        return f"{year:04d}-{month:02d}-{day:02d}"
+    
+    @staticmethod
     def mask_generic(original: str) -> str:
         """Generate generic masked value."""
         if original is None:
@@ -153,6 +162,7 @@ def preview_masking(pii_type: str, samples: List[Any]) -> List[str]:
         'phone': masker.mask_phone,
         'ssn': masker.mask_ssn,
         'address': masker.mask_address,
+        'date_of_birth': masker.mask_date_of_birth,
         'generic': masker.mask_generic,
     }
     
