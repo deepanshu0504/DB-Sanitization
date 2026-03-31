@@ -35,6 +35,7 @@ class ColumnInfo:
     data_type: str
     max_length: Optional[int]
     nullable: bool
+    column_name: Optional[str] = None  # For component type detection
 
 
 class SmartMaskerEngine:
@@ -44,6 +45,24 @@ class SmartMaskerEngine:
     Implements Smart Generation logic directly to avoid framework dependencies.
     Each masker type has multiple format tiers that adapt to column length.
     """
+    
+    # Test BIN prefixes - SAFE for generation, will NEVER match real cards
+    TEST_BINS = [
+        # Visa test range (4532-4539)
+        "4532", "4533", "4534", "4535", "4536", "4537", "4538", "4539",
+        # MasterCard test range (5100-5199)
+        "5100", "5105", "5111", "5150", "5155", "5175", "5199",
+        # American Express test range (3711-3799)
+        "3711", "3722", "3734", "3755", "3766", "3777", "3788", "3799",
+        # Discover test
+        "6011"
+    ]
+    
+    # Card type lengths
+    CARD_LENGTH_16 = 16  # Visa, MasterCard, Discover
+    CARD_LENGTH_15 = 15  # American Express
+    CARD_LENGTH_13 = 13  # Older Visa cards
+    MIN_CARD_LENGTH = 13  # Minimum viable card length
     
     def __init__(self, seed: int = 42):
         """Initialize with seed for deterministic masking."""
@@ -329,6 +348,184 @@ class SmartMaskerEngine:
         else:
             return self._generate_generic_smart(str(seed), max_length)
     
+    def _calculate_luhn_digit(self, card_without_checksum: str) -> str:
+        """
+        Calculate Luhn checksum digit for a partial card number.
+        
+        The Luhn algorithm:
+        1. Starting from the rightmost digit, double every second digit
+        2. If doubling results in two digits, add them together (subtract 9)
+        3. Sum all digits
+        4. The checksum is (10 - (sum % 10)) % 10
+        
+        Args:
+            card_without_checksum: Card number without the last checksum digit
+        
+        Returns:
+            Single checksum digit as string
+        """
+        total = 0
+        # Process digits from right to left
+        for i, digit in enumerate(reversed(card_without_checksum)):
+            n = int(digit)
+            
+            # Double every second digit (odd positions when counting from right)
+            if i % 2 == 0:  # This will be doubled after we add checksum
+                n = n * 2
+                if n > 9:
+                    n = n - 9  # Equivalent to adding digits (18 -> 1+8=9)
+            
+            total += n
+        
+        # Calculate checksum digit
+        checksum = (10 - (total % 10)) % 10
+        return str(checksum)
+    
+    def _format_card_with_dashes(self, card_digits: str) -> str:
+        """
+        Format card number with dashes.
+        
+        Args:
+            card_digits: Plain card digits
+        
+        Returns:
+            Formatted card with dashes (e.g., "4532-1234-5678-9012")
+        """
+        if len(card_digits) == 15:  # Amex: 3711-123456-12345
+            return f"{card_digits[0:4]}-{card_digits[4:10]}-{card_digits[10:15]}"
+        elif len(card_digits) == 16:  # Visa/MC/Discover: 4532-1234-5678-9012
+            return f"{card_digits[0:4]}-{card_digits[4:8]}-{card_digits[8:12]}-{card_digits[12:16]}"
+        else:  # 13-digit: 4532-1234-5678-9
+            return f"{card_digits[0:4]}-{card_digits[4:8]}-{card_digits[8:12]}-{card_digits[12:]}"
+    
+    def _format_card_with_spaces(self, card_digits: str) -> str:
+        """
+        Format card number with spaces.
+        
+        Args:
+            card_digits: Plain card digits
+        
+        Returns:
+            Formatted card with spaces (e.g., "4532 1234 5678 9012")
+        """
+        if len(card_digits) == 15:  # Amex: 3711 123456 12345
+            return f"{card_digits[0:4]} {card_digits[4:10]} {card_digits[10:15]}"
+        elif len(card_digits) == 16:  # Visa/MC/Discover: 4532 1234 5678 9012
+            return f"{card_digits[0:4]} {card_digits[4:8]} {card_digits[8:12]} {card_digits[12:16]}"
+        else:  # 13-digit: 4532 1234 5678 9
+            return f"{card_digits[0:4]} {card_digits[4:8]} {card_digits[8:12]} {card_digits[12:]}"
+    
+    def _generate_credit_card_smart(self, seed: int, max_length: int) -> str:
+        """
+        Smart Generation for credit cards - 3 format tiers with Luhn validation.
+        
+        - Formatted (≥19 chars): "4532-1234-5678-9012" or "4532 1234 5678 9012"
+        - Plain (≥16 chars): "4532123456789012"
+        - Short (13-15 chars): "4532123456789"
+        
+        All generated cards:
+        - Use TEST BIN ranges only (never real cards)
+        - Pass Luhn checksum validation
+        - Are deterministic (same input → same output)
+        
+        Args:
+            seed: Deterministic seed for generation
+            max_length: Maximum column length
+        
+        Returns:
+            Valid credit card number fitting within max_length
+        
+        Raises:
+            ValueError: If max_length < 13 (minimum card length)
+        """
+        if max_length < self.MIN_CARD_LENGTH:
+            raise ValueError(
+                f"Column too short for credit card: {max_length}. "
+                f"Minimum required: {self.MIN_CARD_LENGTH}"
+            )
+        
+        # Determine card length based on column constraints first
+        if max_length >= 19:
+            # Can accommodate formatted output - use 16 or 15 digit cards
+            # Select test BIN deterministically
+            bin_prefix = self.TEST_BINS[seed % len(self.TEST_BINS)]
+            if bin_prefix.startswith("37"):  # Amex
+                card_length = self.CARD_LENGTH_15
+            else:
+                card_length = self.CARD_LENGTH_16
+        elif max_length >= 16:
+            # Can accommodate plain 16-digit cards, avoid Amex (15 digits + format = 18)
+            # Select only non-Amex BINs
+            non_amex_bins = [b for b in self.TEST_BINS if not b.startswith("37")]
+            bin_prefix = non_amex_bins[seed % len(non_amex_bins)]
+            card_length = self.CARD_LENGTH_16
+        else:
+            # Use 13-digit format for short columns
+            non_amex_bins = [b for b in self.TEST_BINS if not b.startswith("37")]
+            bin_prefix = non_amex_bins[seed % len(non_amex_bins)]
+            card_length = self.CARD_LENGTH_13
+        
+        # Generate account number digits (excluding BIN and checksum)
+        digits_needed = card_length - len(bin_prefix) - 1
+        account_digits = ""
+        current_seed = seed
+        
+        for i in range(digits_needed):
+            digit = current_seed % 10
+            account_digits += str(digit)
+            current_seed = current_seed >> 3  # Shift for next digit
+        
+        # Combine BIN + account digits (without checksum yet)
+        card_without_check = bin_prefix + account_digits
+        
+        # Calculate and append Luhn checksum digit
+        check_digit = self._calculate_luhn_digit(card_without_check)
+        card_digits = card_without_check + check_digit
+        
+        # Format based on available length
+        if max_length >= 19:
+            # Use formatted output (alternate between dashes and spaces for diversity)
+            if seed % 2 == 0:
+                return self._format_card_with_dashes(card_digits)
+            else:
+                return self._format_card_with_spaces(card_digits)
+        else:
+            # Use plain digits (no formatting)
+            return card_digits
+    
+    def _detect_address_component_type(self, column_info: ColumnInfo) -> str:
+        """
+        Detect address component type from column name.
+        
+        Uses regex patterns to identify if the column contains a specific
+        address component (city, state, postal code) or full address.
+        
+        Args:
+            column_info: Column metadata with column_name for pattern matching
+        
+        Returns:
+            Component type: "city", "state", "postal", "line", or "full"
+        """
+        import re
+        
+        # If no column name available, default to full address
+        if not column_info.column_name:
+            return "full"
+        
+        col_name = column_info.column_name.lower()
+        
+        # Pattern matching (case-insensitive)
+        if re.search(r'\bcity\b', col_name):
+            return "city"
+        elif re.search(r'\bstate\b', col_name):
+            return "state"
+        elif re.search(r'zip|postal', col_name):
+            return "postal"
+        elif re.search(r'street|address|addr|line', col_name):
+            return "line"
+        else:
+            return "full"
+    
     def mask_value(
         self,
         original: Any,
@@ -351,19 +548,20 @@ class SmartMaskerEngine:
         if original is None:
             return None
         
+        # Get effective max length (handle NVARCHAR vs VARCHAR)
+        max_length = column_info.max_length
+        if max_length == -1:  # MAX type
+            max_length = 4000
+        
         # Create deterministic key for FK consistency
+        # Include max_length for PII types with length-dependent formatting
         if use_mapping:
-            cache_key = f"{pii_type}:{str(original)}"
+            cache_key = f"{pii_type}:{str(original)}:{max_length}"
             if cache_key in self._mapping_cache:
                 return self._mapping_cache[cache_key]
         
         # Get deterministic seed from value
         seed = self._get_deterministic_seed(original)
-        
-        # Get effective max length (handle NVARCHAR vs VARCHAR)
-        max_length = column_info.max_length
-        if max_length == -1:  # MAX type
-            max_length = 4000
         
         # Generate masked value using Smart Generation
         try:
@@ -376,13 +574,17 @@ class SmartMaskerEngine:
             elif pii_type == 'ssn':
                 masked_value = self._generate_ssn_smart(seed, max_length)
             elif pii_type == 'address':
-                # Use generic address format
-                masked_value = self._generate_address_smart(seed, max_length, "full")
+                # Detect component type from column name
+                component_type = self._detect_address_component_type(column_info)
+                masked_value = self._generate_address_smart(seed, max_length, component_type)
             elif pii_type == 'date_of_birth':
                 # Generate date with age range 18-80 years
                 masked_value = self._generate_date_of_birth_smart(
                     seed, max_length, column_info.data_type
                 )
+            elif pii_type == 'credit_card':
+                # Generate credit card with Luhn validation and test BINs
+                masked_value = self._generate_credit_card_smart(seed, max_length)
             else:  # generic and any other type
                 masked_value = self._generate_generic_smart(original, max_length)
         except ValueError as e:
@@ -464,7 +666,8 @@ def get_column_metadata(conn, schema: str, table: str, column: str) -> ColumnInf
         return ColumnInfo(
             data_type="NVARCHAR",
             max_length=255,
-            nullable=True
+            nullable=True,
+            column_name=column
         )
     
     data_type = row[0]
@@ -474,7 +677,8 @@ def get_column_metadata(conn, schema: str, table: str, column: str) -> ColumnInf
     return ColumnInfo(
         data_type=data_type,
         max_length=max_length,
-        nullable=is_nullable
+        nullable=is_nullable,
+        column_name=column
     )
 
 
@@ -696,6 +900,7 @@ def main():
         print(f"  [OK] SSNMasker: 2 format tiers (9-11 chars)")
         print(f"  [OK] AddressMasker: Smart length adaptation")
         print(f"  [OK] DateOfBirthMasker: Age range 18-80 years, 4 format tiers")
+        print(f"  [OK] CreditCardMasker: 3 format tiers (13-19 chars), Luhn validated")
         print(f"  [OK] GenericMasker: Exact length generation")
     except Exception as e:
         print(f"  [ERR] Initialization failed: {e}")
