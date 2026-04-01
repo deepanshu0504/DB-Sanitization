@@ -133,6 +133,15 @@ try:
     
     conn.close()
     
+    # Build column metadata lookup for nullable values
+    column_metadata = {}
+    for table in tables:
+        schema_name = table.get("schema")
+        table_name = table.get("name")
+        for col in table.get("columns", []):
+            key = (schema_name, table_name, col.get("name"))
+            column_metadata[key] = {"nullable": col.get("nullable", True)}
+    
 except Exception as e:
     logger.error(f"   ✗ Schema extraction failed: {e}")
     import traceback
@@ -229,12 +238,16 @@ try:
     # Convert to configuration format
     pii_column_configs = []
     for col in pii_columns:
+        # Get actual nullable value from schema metadata
+        col_key = (col.schema, col.table, col.column)
+        nullable = column_metadata.get(col_key, {}).get("nullable", True)  # Default to True for safety
+        
         pii_column_configs.append({
             "schema": col.schema,
             "table": col.table,
             "column": col.column,
             "pii_type": col.pii_type,
-            "nullable": True,  # User should verify
+            "nullable": nullable,
         })
     
     # Build output configuration
@@ -281,7 +294,7 @@ logger.info(f"Configuration file: {output_path}")
 logger.info("\nNext steps:")
 logger.info("1. Review the generated configuration file")
 logger.info("2. Add or remove PII columns as needed")
-logger.info("3. Set correct nullable flags based on schema")
+logger.info("3. Verify nullable flags (auto-detected from schema)")
 logger.info("4. Update dry_run to False when ready to sanitize")
 logger.info("\n" + "=" * 70)
 

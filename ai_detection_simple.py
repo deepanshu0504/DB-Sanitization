@@ -93,6 +93,15 @@ def main():
         traceback.print_exc()
         return
     
+    # Build column metadata lookup for nullable values
+    column_metadata = {}
+    for table in schema_metadata.get("tables", []):
+        schema_name = table.get("schema")
+        table_name = table.get("name")
+        for col in table.get("columns", []):
+            key = (schema_name, table_name, col.get("name"))
+            column_metadata[key] = {"nullable": col.get("nullable", True)}
+    
     # Initialize AI client
     print("\n4. Initializing AI client...")
     
@@ -166,12 +175,16 @@ def main():
         # Convert to configuration format
         pii_column_configs = []
         for col in pii_columns:
+            # Get actual nullable value from schema metadata
+            col_key = (col.schema, col.table, col.column)
+            nullable = column_metadata.get(col_key, {}).get("nullable", True)  # Default to True for safety
+            
             pii_column_configs.append({
                 "schema": col.schema,
                 "table": col.table,
                 "column": col.column,
                 "pii_type": col.pii_type,
-                "nullable": True,  # Default, user should review
+                "nullable": nullable,
             })
         
         # Build output configuration
@@ -217,7 +230,7 @@ def main():
     print("\nNext steps:")
     print("1. Review the generated configuration file")
     print("2. Add or remove PII columns as needed")
-    print("3. Set correct nullable flags based on schema")
+    print("3. Verify nullable flags (auto-detected from schema)")
     print("4. Update dry_run to False when ready to sanitize")
     print("\n" + "=" * 70)
 

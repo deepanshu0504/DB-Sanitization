@@ -122,6 +122,13 @@ for row in cursor.fetchall():
 
 conn.close()
 
+# Build column metadata lookup for nullable values
+column_metadata = {}
+for table in tables:
+    for col in table['columns']:
+        key = (table['schema'], table['name'], col['name'])
+        column_metadata[key] = {"nullable": col['nullable']}
+
 logger.info(f"   + Found {len(tables)} tables (excluded {excluded_count} system/metadata tables):")
 for table in tables[:5]:  # Show only first 5 to avoid log spam
     logger.info(f"     - {table['schema']}.{table['name']} ({len(table['columns'])} columns)")
@@ -325,12 +332,16 @@ logger.info(f"\n5. Saving configuration to {output_path}...")
 # Convert to config format
 pii_column_configs = []
 for col in pii_columns:
+    # Get actual nullable value from schema metadata
+    col_key = (col["schema"], col["table"], col["column"])
+    nullable = column_metadata.get(col_key, {}).get("nullable", True)  # Default to True for safety
+    
     pii_column_configs.append({
         "schema": col["schema"],
         "table": col["table"],
         "column": col["column"],
         "pii_type": col["pii_type"],
-        "nullable": True  # User should verify
+        "nullable": nullable
     })
 
 output_config = {
