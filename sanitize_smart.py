@@ -16,6 +16,7 @@ Usage:
 
 Author: Database Sanitization Team
 Date: 2026-03-28
+
 """
 
 import json
@@ -27,7 +28,62 @@ from typing import Dict, List, Any, Optional, Tuple, Union
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 from dataclasses import dataclass
+# ================================
+# Dynamic Name Component Detection
+# ================================
 
+NAME_COMPONENT_PATTERNS = {
+    "first": [
+        r"\bfirst\b",           # FirstName, first_name, FIRST_NAME
+        r"\bfname\b",           # fname, FName (after normalization)
+        r"\bgiven\b",           # GivenName, given_name
+        r"\bf[\s_]?name\b",     # f_name, f name, FName
+        r"\bgivenname\b",       # givenname (single word)
+        r"\bforename\b",        # forename (single word)
+        r"\bfore[\s_]?name\b",  # ForeName, fore_name, fore name
+        r"\bfirstname\b"        # firstname (single word)
+    ],
+    "middle": [
+        r"\bmiddle\b",          # MiddleName, middle_name
+        r"\bmname\b",           # mname, MName (after normalization)
+        r"\bm[\s_]?name\b",     # m_name, m name, MName
+        r"\bmiddlename\b",      # middlename (single word)
+        r"\bmiddle[\s_]?initial\b"  # middle_initial, middle initial, MiddleInitial
+    ],
+    "last": [
+        r"\blast\b",            # LastName, last_name
+        r"\blname\b",           # lname, LName (after normalization)
+        r"\bsurname\b",         # Surname, surname
+        r"\bfamily\b",          # FamilyName, family_name
+        r"\bl[\s_]?name\b",     # l_name, l name, LName
+        r"\blastname\b",        # lastname (single word)
+        r"\bfamilyname\b"       # familyname (single word)
+    ],
+    "full": [
+        r"\bfull\b",                    # FullName, full_name
+        r"\bfullname\b",                # fullname (single word)
+        r"\bfull[\s_]?name\b",          # full_name, full name, FullName
+        r"\bcomplete\b",                # CompleteName, complete_name
+        r"\bcomplete[\s_]?name\b",      # complete_name, complete name, CompleteName
+        r"^name$",                      # Exact match: "name" only
+        r"^full[\s_]?name$",            # Exact match: fullname/full_name/full name
+        r"\b(person|employee|customer|contact|user|student|patient)[\s_]?name\b"  # Generic entity names
+    ]
+}
+
+# Dynamic address component detection patterns
+ADDRESS_COMPONENT_PATTERNS = {
+    "city": [r"\bcity\b"],
+    "state": [r"\bstate\b", r"\bprovince\b", r"\bregion\b"],
+    "postal": [r"zip", r"postal", r"pincode"],
+    "line": [r"street", r"address", r"addr", r"line"],
+     "country": [
+        r"\bcountry\b",
+        r"\bnation\b",
+        r"\bcountry_code\b",
+        r"\biso_country\b"
+            ]
+    }
 
 @dataclass
 class ColumnInfo:
@@ -63,6 +119,7 @@ class SmartMaskerEngine:
     CARD_LENGTH_15 = 15  # American Express
     CARD_LENGTH_13 = 13  # Older Visa cards
     MIN_CARD_LENGTH = 13  # Minimum viable card length
+
     
     def __init__(self, seed: int = 42):
         """Initialize with seed for deterministic masking."""
@@ -126,43 +183,53 @@ class SmartMaskerEngine:
             # Minimal format
             return f"{area}{exchange:03d}{subscriber:04d}"
     
-    def _generate_name_smart(self, seed: int, max_length: int) -> str:
+    def _generate_name_smart(self, seed: int, max_length: int, component_type: str = "full") -> str:
         """
-        Smart Generation for names - 4 format tiers.
-        
-        - Full (≥20 chars): Dr. John Smith Jr.
-        - First+Last (≥10 chars): John Smith
-        - First Only (≥4 chars): John
-        - Initial (≥2 chars): JS
+        Smart Generation for names with component awareness.
         """
-        if max_length < 2:
+
+        if max_length < 1:
             raise ValueError(f"Column too short for name: {max_length}")
-        
+
         first_names = ["John", "Jane", "Mike", "Sarah", "David", "Emma", "James", "Mary",
-                      "Robert", "Lisa", "William", "Nancy", "Richard", "Karen", "Joseph"]
+                    "Robert", "Lisa", "William", "Nancy", "Richard", "Karen", "Joseph"]
+
+        middle_names = ["A.", "B.", "C.", "D.", "E.", "K.", "R.", "S."]
+
         last_names = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller",
-                     "Davis", "Rodriguez", "Martinez", "Lopez", "Wilson", "Anderson"]
-        
+                    "Davis", "Rodriguez", "Martinez", "Lopez", "Wilson", "Anderson"]
+
         random.seed(seed)
+
         first = random.choice(first_names)
+        middle = random.choice(middle_names)
         last = random.choice(last_names)
-        
+
+        # 🎯 Component-specific generation
+        if component_type == "first":
+            return first[:max_length]
+
+        elif component_type == "middle":
+            return middle[:max_length]
+
+        elif component_type == "last":
+            return last[:max_length]
+
+        # 🎯 Full name logic
         if max_length >= 20:
-            # Full format with title and suffix
             title = random.choice(["Dr.", "Mr.", "Mrs.", "Ms."])
             suffix = random.choice(["Jr.", "Sr.", "III", ""])
-            if suffix:
-                return f"{title} {first} {last} {suffix}"
-            return f"{title} {first} {last}"
+            full = f"{title} {first} {last} {suffix}".strip()
+            return full[:max_length]
+
         elif max_length >= 10:
-            # First + Last
-            return f"{first} {last}"
+            return f"{first} {last}"[:max_length]
+
         elif max_length >= 4:
-            # First only
-            return first
+            return first[:max_length]
+
         else:
-            # Initials
-            return f"{first[0]}{last[0]}"
+            return f"{first[0]}{last[0]}"[:max_length]
     
     def _generate_ssn_smart(self, seed: int, max_length: int) -> str:
         """
@@ -188,24 +255,58 @@ class SmartMaskerEngine:
     
     def _generate_generic_smart(self, original: str, max_length: int) -> str:
         """
-        Smart Generation for generic - exact length generation.
-        
-        Generates alphanumeric string matching original length, up to max_length.
+        Smart Generation for generic PII - keeps original data type and format.
+
+        - Preserves numeric, alphabetic, and alphanumeric formats.
+        - Respects original length and max_length.
         """
+        import random
+        import string
+
+        original_str = str(original)
         if max_length is None:
-            max_length = len(str(original))
-        
-        target_length = min(len(str(original)), max_length)
-        
+            max_length = len(original_str)
+
+        target_length = min(len(original_str), max_length)
         if target_length == 0:
             return ""
-        
-        # Deterministic character generation
+
+        # Deterministic seed to ensure same value for same original
         seed_val = self._get_deterministic_seed(original)
         random.seed(seed_val)
-        
-        chars = string.ascii_letters + string.digits
-        return ''.join(random.choices(chars, k=target_length))
+
+        # Detect format of original
+        if original_str.isdigit():
+            # Numeric column → replace with digits only
+            return ''.join(random.choices(string.digits, k=target_length))
+        elif original_str.isalpha():
+            # Alphabetic column → letters only
+            return ''.join(random.choices(string.ascii_letters, k=target_length))
+        elif original_str.isalnum():
+            # Alphanumeric column → letters + digits
+            return ''.join(random.choices(string.ascii_letters + string.digits, k=target_length))
+        elif self._is_decimal(original_str):
+            # Decimal numbers → keep digits and decimal point
+            parts = original_str.split(".")
+            int_part = ''.join(random.choices(string.digits, k=len(parts[0])))
+            if len(parts) > 1:
+                frac_part = ''.join(random.choices(string.digits, k=len(parts[1])))
+                return f"{int_part}.{frac_part}"
+            return int_part
+        else:
+            # Mixed/Other → replace with printable characters but maintain length
+            return ''.join(random.choices(string.printable.strip(), k=target_length))
+
+
+    def _is_decimal(self, value: str) -> bool:
+        """
+        Helper to check if a string is a decimal number
+        """
+        try:
+            float(value)
+            return True
+        except ValueError:
+            return False
     
     def _generate_date_of_birth_smart(
         self, 
@@ -343,6 +444,31 @@ class SmartMaskerEngine:
             if len(state) > max_length:
                 state = state[:max_length]
             return state
+        
+        # For Country
+        elif component_type == "country":
+            # Smart country generation based on column length
+            
+            # ISO-2 codes
+            iso2 = ["US", "IN", "GB", "CA", "AU", "DE", "FR", "JP"]
+            
+            # ISO-3 codes
+            iso3 = ["USA", "IND", "GBR", "CAN", "AUS", "DEU", "FRA", "JPN"]
+            
+            # Full country names
+            full_names = [
+                "United States", "India", "United Kingdom", "Canada",
+                "Australia", "Germany", "France", "Japan"
+            ]
+            
+            if max_length <= 3:
+                value = iso2[seed % len(iso2)]
+            elif max_length <= 5:
+                value = iso3[seed % len(iso3)]
+            else:
+                value = full_names[seed % len(full_names)]
+            
+            return value[:max_length]
         
         # Default: use generic
         else:
@@ -495,37 +621,77 @@ class SmartMaskerEngine:
     
     def _detect_address_component_type(self, column_info: ColumnInfo) -> str:
         """
-        Detect address component type from column name.
-        
-        Uses regex patterns to identify if the column contains a specific
-        address component (city, state, postal code) or full address.
-        
-        Args:
-            column_info: Column metadata with column_name for pattern matching
+        Detect address component type from column name using dynamic patterns.
         
         Returns:
-            Component type: "city", "state", "postal", "line", or "full"
+            Component type: "city", "state", "postal", "line", "country", or "full"
         """
         import re
+        from collections import defaultdict
         
-        # If no column name available, default to full address
         if not column_info.column_name:
             return "full"
         
         col_name = column_info.column_name.lower()
+        scores = defaultdict(int)
         
-        # Pattern matching (case-insensitive)
-        if re.search(r'\bcity\b', col_name):
-            return "city"
-        elif re.search(r'\bstate\b', col_name):
-            return "state"
-        elif re.search(r'zip|postal', col_name):
-            return "postal"
-        elif re.search(r'street|address|addr|line', col_name):
-            return "line"
-        else:
+        # Score-based pattern matching (more robust than first-match)
+        for component, patterns in ADDRESS_COMPONENT_PATTERNS.items():
+            for pattern in patterns:
+                if re.search(pattern, col_name):
+                    scores[component] += 1
+        
+        if not scores:
             return "full"
+        
+        return max(scores, key=scores.get)
     
+    def _detect_name_component_type(self, column_info: ColumnInfo) -> str:
+        """
+        Detect name component type from column name using regex patterns.
+        
+        Uses priority-based detection: component-specific patterns (first/middle/last)
+        are checked first and take precedence over generic "full" patterns.
+        
+        Returns:
+            "first", "middle", "last", or "full"
+        """
+        import re
+        
+        if not column_info.column_name:
+            return "full"
+        
+        # Normalize column name (VERY IMPORTANT)
+        col_name = column_info.column_name
+        
+        # 1. Replace underscores with spaces first
+        col_name = col_name.replace("_", " ")
+        
+        # 2. Insert spaces before capital letters (CamelCase → Camel Case)
+        #    Only if the string is not all uppercase (to avoid "FIRST" → "F I R S T")
+        if not col_name.isupper():
+            col_name = re.sub(r'(?<!^)(?=[A-Z])', ' ', col_name)
+        
+        # 3. Convert to lowercase
+        col_name = col_name.lower()
+        
+        # Priority 1: Check component-specific patterns first (first/middle/last)
+        # These take precedence to avoid conflicts with generic "name" pattern
+        component_types = ["first", "middle", "last"]
+        for component in component_types:
+            patterns = NAME_COMPONENT_PATTERNS.get(component, [])
+            for pattern in patterns:
+                if re.search(pattern, col_name):
+                    return component  # Early exit on first match
+        
+        # Priority 2: Check "full" patterns only if no component matched
+        full_patterns = NAME_COMPONENT_PATTERNS.get("full", [])
+        for pattern in full_patterns:
+            if re.search(pattern, col_name):
+                return "full"
+        
+        # Default fallback: treat as full name if no patterns matched
+        return "full"
     def mask_value(
         self,
         original: Any,
@@ -570,7 +736,8 @@ class SmartMaskerEngine:
             elif pii_type == 'phone':
                 masked_value = self._generate_phone_smart(seed, max_length)
             elif pii_type == 'name':
-                masked_value = self._generate_name_smart(seed, max_length)
+                component_type = self._detect_name_component_type(column_info)
+                masked_value = self._generate_name_smart(seed, max_length, component_type)
             elif pii_type == 'ssn':
                 masked_value = self._generate_ssn_smart(seed, max_length)
             elif pii_type == 'address':
