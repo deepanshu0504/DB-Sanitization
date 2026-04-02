@@ -2,6 +2,15 @@
 
 A comprehensive, domain-agnostic Python framework for sanitizing Microsoft SQL Server databases by identifying, masking, and managing Personally Identifiable Information (PII).
 
+## 📚 Documentation
+
+- **[Quick Start Guide](docs/QUICK_START.md)** - Get started in 15 minutes (installation + first sanitization)
+- **[Workflow Guide](docs/WORKFLOW_GUIDE.md)** - Complete documentation: prerequisites, usage, troubleshooting, best practices
+- **[Cheat Sheet](docs/CHEAT_SHEET.md)** - Quick reference: commands, SQL queries, configurations
+- **[Troubleshooting FAQ](docs/TROUBLESHOOTING.md)** - Common issues and solutions with detailed fixes
+- **[User Stories](docs/USER_STORIES.md)** - Development phases and implementation status
+- **[Requirements](docs/Requirement/requirement.md)** - Functional and non-functional requirements
+
 ## Features
 
 - 🔒 **AI-Powered PII Detection** - Automatically identify PII columns using GitHub Copilot API
@@ -73,24 +82,57 @@ A comprehensive, domain-agnostic Python framework for sanitizing Microsoft SQL S
 
 ## Quick Start
 
+> **📖 For detailed instructions, see [QUICK_START.md](QUICK_START.md) or [WORKFLOW_GUIDE.md](WORKFLOW_GUIDE.md)**
+
 ### Prerequisites
 
 - Python 3.10 or higher
-- Microsoft SQL Server 2016+ (or Azure SQL Database)
+- Microsoft SQL Server 2016+ (or Azure SQL Database)  
 - ODBC Driver 17 for SQL Server
+- GitHub Copilot API access
 
 ### Installation
 
 ```bash
-# Clone the repository
-git clone <repository-url>
-cd Database-Sanitization
+# Clone and navigate
+cd DB-Sanitization
+
+# Create virtual environment
+python -m venv venv
+venv\Scripts\activate  # Windows
+# source venv/bin/activate  # Linux/macOS
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Configure environment (.env file)
+SQLSERVER_HOST=localhost
+SQLSERVER_DB=YourDatabase
+GITHUB_COPILOT_TOKEN=ghp_your_token_here
 ```
 
-### Basic Usage
+### Complete Workflow (3 Steps)
+
+```bash
+# Step 1: AI-powered PII detection
+python ai_detection_direct.py
+
+# Step 2: Validate configuration
+python validate_config_direct.py config/pii_config_ai_generated.json
+
+# Step 3a: Test with dry-run (default - safe, no changes)
+python sanitize_smart.py config/pii_config_ai_generated.json
+
+# Step 3b: Edit config: Set "dry_run": false, then execute actual sanitization
+python sanitize_smart.py config/pii_config_ai_generated.json
+
+# Step 4: Verify results in database
+# ⚠️ Note: Sanitization is irreversible without backup
+```
+
+**⚠️ CRITICAL:** Sanitization permanently replaces original data. Always backup before running with `dry_run: false`.
+
+### Basic Usage (Legacy Example - For Framework Development)
 
 ```python
 from src.database import DatabaseConnectionManager, ConnectionConfig, AuthType
