@@ -24,22 +24,10 @@ import pyodbc
 import hashlib
 import random
 import string
-import uuid
-import time
-import logging
 from typing import Dict, List, Any, Optional, Tuple, Union
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 from dataclasses import dataclass
-
-# Mapping capture components
-from database.schema_inspector import SchemaInspector, PrimaryKeyInfo, SchemaInspectionError
-from mapping.mapping_table_manager import MappingTableManager, MappingRecord
-from mapping.exceptions import MappingTableError, MappingInsertError
-
-# Configure logging
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 # ================================
 # Dynamic Name Component Detection
 # ================================
@@ -868,15 +856,10 @@ def sanitize_column(
     column: str,
     pii_type: str,
     masker_engine: SmartMaskerEngine,
-    dry_run: bool = True,
-    # NEW: Mapping capture parameters
-    schema_inspector: Optional[SchemaInspector] = None,
-    mapping_manager: Optional[MappingTableManager] = None,
-    batch_id: Optional[str] = None,
-    sanitization_run_id: Optional[str] = None
-) -> Dict[str, Any]:
+    dry_run: bool = True
+) -> int:
     """
-    Sanitize a single column using Smart Generation with optional mapping capture.
+    Sanitize a single column using Smart Generation.
     
     Args:
         conn: Database connection
@@ -886,16 +869,11 @@ def sanitize_column(
         pii_type: Type of PII for masking strategy
         masker_engine: SmartMaskerEngine instance
         dry_run: If True, don't actually update database
-        schema_inspector: Optional SchemaInspector for PK extraction
-        mapping_manager: Optional MappingTableManager for mapping capture
-        batch_id: Optional batch ID for tracking
-        sanitization_run_id: Optional run ID for tracking
         
     Returns:
-        Dict with statistics: rows_updated, mappings_captured, duration, etc.
+        Number of rows updated
     """
     fully_qualified = f"[{schema}].[{table}]"
-    start_time = time.time()
     
     try:
         # Get column metadata for Smart Generation
@@ -904,267 +882,116 @@ def sanitize_column(
         print(f"     Type: {pii_type}")
         print(f"     Column: {column_info.data_type}({column_info.max_length})")
         
-        # Extract primary key information for mapping capture
-        pk_info = None
-        if schema_inspector:
-            try:
-                pk_info = schema_inspector.get_primary_key_columns(table, schema)
-                if not pk_info.has_pk:
-                    logger.warning(
-                        f"Table {fully_qualified} has no PK. Using ROW_NUMBER fallback for mapping capture. "
-                        f"Record-level desanitization will not be possible."
-                    )
-            except SchemaInspectionError as e:
-                logger.warning(f"Could not extract PK for {fully_qualified}: {e}")
-        
-        # Build query to fetch data WITH primary keys if mapping capture enabled
-        if pk_info and schema_inspector:
-            pk_select = schema_inspector.build_pk_select_expression(pk_info)
-            select_query = f"""
-                SELECT 
-                    {pk_select} AS record_id,
-                    [{column}]
-                FROM {fully_qualified}
-                WHERE [{column}] IS NOT NULL
-            """
-        else:
-            # Fallback: No PK capture (original behavior)
-            select_query = f"SELECT [{column}] FROM {fully_qualified} WHERE [{column}] IS NOT NULL"
-        
+        # Fetch current values
+        select_query = f"SELECT [{column}] FROM {fully_qualified} WHERE [{column}] IS NOT NULL"
         cursor = conn.cursor()
         cursor.execute(select_query)
-        rows = cursor.fetchall()
-        cursor.close()
         
-        # Process and build update mappings + mapping records
+        # Process and build update mappings
         updates = []
-        mapping_records = []
-        table_full_name = f"{schema}.{table}" if schema != "dbo" else table
+        for row in cursor.fetchall():
+            original = row[0]
+            masked = masker_engine.mask_value(original, pii_type, column_info)
+            updates.append((original, masked))  # (original, masked) for temp table insert
         
-        if pk_info and schema_inspector:
-            # With PK capture
-            for row in rows:
-                record_id = row[0]
-                original = row[1]
-                masked = masker_engine.mask_value(original, pii_type, column_info)
-                updates.append((original, masked))
-                
-                # Capture mapping if enabled
-                if mapping_manager and batch_id and sanitization_run_id:
-                    mapping_records.append(MappingRecord(
-                        table_name=table_full_name,
-                        column_name=column,
-                        record_id=str(record_id) if record_id is not None else "NULL",
-                        original_value=original,
-                        masked_value=masked,
-                        batch_id=batch_id,
-                        sanitization_run_id=sanitization_run_id
-                    ))
-        else:
-            # Without PK capture (original behavior)
-            for row in rows:
-                original = row[0]
-                masked = masker_engine.mask_value(original, pii_type, column_info)
-                updates.append((original, masked))
+        cursor.close()
         
         if not updates:
             print(f"     [OK] No non-NULL values to update")
-            duration = time.time() - start_time
-            return {
-                "rows_updated": 0,
-                "mappings_captured": 0,
-                "duration": duration,
-                "table": table,
-                "column": column
-            }
+            return 0
         
         # Update database (if not dry-run)
-        mappings_captured = 0
-        rows_affected = 0
-        
         if not dry_run:
-            # Ensure autocommit is OFF for transaction safety
-            original_autocommit = conn.autocommit
-            conn.autocommit = False
+            cursor = conn.cursor()
             
-            # Transaction-safe update with mapping capture and fallback error handling
+            # HIGH PERFORMANCE: Use temp table with single UPDATE-JOIN
             try:
-                cursor = conn.cursor()
+                # Step 1: Create temp table
+                cursor.execute(f"""
+                    IF OBJECT_ID('tempdb..#temp_mappings') IS NOT NULL
+                        DROP TABLE #temp_mappings;
+                    
+                    CREATE TABLE #temp_mappings (
+                        original_value NVARCHAR(MAX),
+                        masked_value NVARCHAR(MAX)
+                    );
+                """)
                 
-                # HIGH PERFORMANCE PATH: Use temp table with single UPDATE-JOIN
-                try:
-                    # Step 1: Create temp table
-                    cursor.execute(f"""
-                        IF OBJECT_ID('tempdb..#temp_mappings') IS NOT NULL
-                            DROP TABLE #temp_mappings;
-                        
-                        CREATE TABLE #temp_mappings (
-                            original_value NVARCHAR(MAX),
-                            masked_value NVARCHAR(MAX)
-                        );
-                    """)
-                    
-                    # Step 2: Bulk insert mappings
-                    insert_query = "INSERT INTO #temp_mappings (original_value, masked_value) VALUES (?, ?)"
-                    cursor.executemany(insert_query, updates)
-                    
-                    # Step 3: Single UPDATE with JOIN (fast!)
-                    update_query = f"""
-                        UPDATE t
-                        SET t.[{column}] = m.masked_value
-                        FROM {fully_qualified} t
-                        INNER JOIN #temp_mappings m ON t.[{column}] = m.original_value
-                        WHERE t.[{column}] IS NOT NULL;
-                    """
-                    cursor.execute(update_query)
-                    rows_affected = cursor.rowcount
-                    
-                    # Handle -1 rowcount (fallback to update list count)
-                    if rows_affected == -1:
-                        rows_affected = len(updates)
-                    
-                    # Step 4: Capture mappings (same transaction)
-                    if mapping_manager and mapping_records:
-                        mapping_start = time.time()
-                        try:
-                            successful_mappings, errors = mapping_manager.insert_batch_no_commit(
-                                conn, mapping_records, batch_size=5000
-                            )
-                            mapping_duration = time.time() - mapping_start
-                            mappings_captured = len(successful_mappings)
-                            
-                            if errors:
-                                logger.warning(f"     {len(errors)} mapping capture errors (first 3):")
-                                for err in errors[:3]:
-                                    logger.warning(f"       - {err}")
-                            else:
-                                print(f"     [OK] Captured {mappings_captured:,} mappings in {mapping_duration:.2f}s")
-                        except Exception as map_err:
-                            # Mapping capture is optional - don't fail sanitization
-                            logger.warning(f"     [WARN] Mapping capture failed: {map_err}")
-                            logger.warning(f"     [WARN] Continuing with sanitization without mappings")
-                            mappings_captured = 0
-                    
-                    # Step 5: Cleanup temp table
-                    try:
-                        cursor.execute("DROP TABLE #temp_mappings;")
-                    except:
-                        pass  # Temp table cleanup is best-effort
-                    
-                    # Step 6: Commit everything together
-                    conn.commit()
-                    
-                    print(f"     [OK] Updated {rows_affected:,} rows")
-                    if mappings_captured > 0:
-                        print(f"     [OK] Mappings committed atomically with updates")
+                # Step 2: Bulk insert mappings
+                insert_query = "INSERT INTO #temp_mappings (original_value, masked_value) VALUES (?, ?)"
+                cursor.executemany(insert_query, updates)
+                conn.commit()
                 
-                except pyodbc.Error as bulk_error:
-                    # FALLBACK PATH: Bulk update failed, rollback and try row-by-row
-                    conn.rollback()
-                    error_msg = str(bulk_error)
-                    logger.warning(f"     [WARN] Bulk update failed: {error_msg[:200]}")
-                    logger.info(f"     [INFO] Falling back to row-by-row updates...")
-                    
-                    # Cleanup temp table if it exists
-                    try:
-                        cursor.execute("""
-                            IF OBJECT_ID('tempdb..#temp_mappings') IS NOT NULL
-                                DROP TABLE #temp_mappings;
-                        """)
-                    except:
-                        pass
-                    
-                    # Row-by-row fallback (slower but more reliable)
-                    update_query = f"""
-                        UPDATE {fully_qualified}
-                        SET [{column}] = ?
-                        WHERE [{column}] = ?
-                    """
-                    
-                    total_updated = 0
-                    for original_val, masked_val in updates:
-                        try:
-                            cursor.execute(update_query, (masked_val, original_val))
-                            if cursor.rowcount > 0:
-                                total_updated += cursor.rowcount
-                        except pyodbc.Error as row_err:
-                            # Skip problematic rows but log them
-                            if "truncat" in str(row_err).lower():
-                                logger.error(f"     [ERR] Truncation on row: {str(row_err)[:100]}")
-                            continue
-                    
-                    rows_affected = total_updated
-                    
-                    # Attempt mapping capture after successful fallback updates
-                    if mapping_manager and mapping_records and total_updated > 0:
-                        try:
-                            mapping_start = time.time()
-                            successful_mappings, errors = mapping_manager.insert_batch_no_commit(
-                                conn, mapping_records, batch_size=5000
-                            )
-                            mapping_duration = time.time() - mapping_start
-                            mappings_captured = len(successful_mappings)
-                            
-                            if errors:
-                                logger.warning(f"     {len(errors)} mapping capture errors")
-                            else:
-                                print(f"     [OK] Captured {mappings_captured:,} mappings (fallback) in {mapping_duration:.2f}s")
-                        except Exception as map_err:
-                            logger.warning(f"     [WARN] Mapping capture failed in fallback: {map_err}")
-                            mappings_captured = 0
-                    
-                    # Commit fallback updates
-                    conn.commit()
-                    
-                    print(f"     [OK] Updated {total_updated:,} rows (fallback method)")
-                    if mappings_captured > 0:
-                        print(f"     [OK] Mappings committed with fallback updates")
+                # Step 3: Single UPDATE with JOIN (fast!)
+                update_query = f"""
+                    UPDATE t
+                    SET t.[{column}] = m.masked_value
+                    FROM {fully_qualified} t
+                    INNER JOIN #temp_mappings m ON t.[{column}] = m.original_value
+                    WHERE t.[{column}] IS NOT NULL;
+                """
+                cursor.execute(update_query)
+                rows_affected = cursor.rowcount
+                conn.commit()
+                
+                # Step 4: Cleanup temp table
+                cursor.execute("DROP TABLE #temp_mappings;")
+                conn.commit()
                 
                 cursor.close()
-            
-            finally:
-                # Always restore autocommit setting
-                conn.autocommit = original_autocommit
+                
+                # Handle -1 rowcount (fallback to update list count)
+                if rows_affected == -1:
+                    rows_affected = len(updates)
+                
+                print(f"     [OK] Updated {rows_affected:,} rows")
+                return rows_affected
+                
+            except pyodbc.Error as inner_e:
+                # Rollback on error
+                conn.rollback()
+                print(f"     [WARN] Bulk update failed: {str(inner_e)[:100]}")
+                print(f"     [INFO] Falling back to row-by-row updates...")
+                
+                # Fallback: Individual updates (slower but reliable)
+                cursor = conn.cursor()
+                update_query = f"""
+                    UPDATE {fully_qualified}
+                    SET [{column}] = ?
+                    WHERE [{column}] = ?
+                """
+                
+                total_updated = 0
+                for original_val, masked_val in updates:
+                    try:
+                        cursor.execute(update_query, (masked_val, original_val))
+                        if cursor.rowcount > 0:
+                            total_updated += cursor.rowcount
+                    except pyodbc.Error:
+                        continue  # Skip problematic rows
+                
+                conn.commit()
+                cursor.close()
+                
+                print(f"     [OK] Updated {total_updated:,} rows (fallback method)")
+                return total_updated
         else:
-            # Dry-run mode
-            rows_affected = len(updates)
-            mappings_captured = len(mapping_records) if mapping_records else 0
-            print(f"     [DRY-RUN] Would update {rows_affected:,} rows")
-            if mappings_captured > 0:
-                print(f"     [DRY-RUN] Would capture {mappings_captured:,} mappings")
-        
-        duration = time.time() - start_time
-        throughput = rows_affected / duration if duration > 0 else 0
-        
-        return {
-            "rows_updated": rows_affected,
-            "mappings_captured": mappings_captured,
-            "duration": duration,
-            "throughput": throughput,
-            "table": table,
-            "column": column
-        }
+            print(f"     [OK] Would update {len(updates):,} rows (DRY-RUN)")
+            return len(updates)
             
-    except Exception as e:
+    except pyodbc.Error as e:
         error_msg = str(e)
-        logger.error(f"     [ERR] Error: {error_msg[:200]}")
+        print(f"     [ERR] Error: {error_msg[:100]}")
         
         # Check for specific error types
         if "truncat" in error_msg.lower():
-            logger.error(f"     [WARN] TRUNCATION ERROR - This should not happen with Smart Generation!")
-            logger.error(f"        Please report this as a bug")
+            print(f"     [WARN] TRUNCATION ERROR - This should not happen with Smart Generation!")
+            print(f"        Column max length: {column_info.max_length}")
+            print(f"        Please report this as a bug")
         elif "computed column" in error_msg.lower():
-            logger.warning(f"     [WARN] Cannot modify computed column - skipping")
+            print(f"     [WARN] Cannot modify computed column - skipping")
         
-        duration = time.time() - start_time
-        return {
-            "rows_updated": 0,
-            "mappings_captured": 0,
-            "duration": duration,
-            "table": table,
-            "column": column,
-            "error": str(e)
-        }
+        return 0
 
 
 def main():
@@ -1246,79 +1073,12 @@ def main():
         print(f"  [ERR] Initialization failed: {e}")
         sys.exit(1)
     
-    # Initialize mapping capture infrastructure
-    print(f"\n[4.5/6] Initializing mapping capture")
-    mapping_config = config.get('mapping_capture', {})
-    mapping_enabled = mapping_config.get('enabled', True)
-    skip_on_dry_run = mapping_config.get('skip_on_dry_run', True)
-    
-    # Initialize encryption if enabled (Story 1.3)
-    encryption_config = config.get('mapping_encryption', {})
-    encryption_enabled = encryption_config.get('enabled', False)
-    encryptor = None
-    
-    if encryption_enabled:
-        try:
-            from mapping.encryption_utils import MappingEncryptor
-            from mapping.exceptions import KeyManagementError
-            
-            key_env_var = encryption_config.get('key_env_var', 'MAPPING_ENCRYPTION_KEY')
-            fallback_env_vars = encryption_config.get('fallback_keys_env_vars', [])
-            
-            encryptor = MappingEncryptor.from_environment(
-                key_env_var=key_env_var,
-                fallback_env_vars=fallback_env_vars if fallback_env_vars else None
-            )
-            print(f"  [OK] Mapping encryption enabled (key from {key_env_var})")
-        except KeyManagementError as e:
-            logger.error(f"  [ERROR] Encryption initialization failed: {e}")
-            logger.error(f"  [ERROR] Cannot proceed with encryption enabled but no valid key")
-            sys.exit(1)
-        except Exception as e:
-            logger.error(f"  [ERROR] Unexpected encryption error: {e}")
-            sys.exit(1)
-    
-    schema_inspector = None
-    mapping_manager = None
-    batch_id = str(uuid.uuid4())
-    sanitization_run_id = str(uuid.uuid4())
-    
-    if mapping_enabled and not (dry_run and skip_on_dry_run):
-        try:
-            schema_inspector = SchemaInspector(conn_string)
-            mapping_manager = MappingTableManager(
-                conn_string,
-                encryptor=encryptor  # Pass encryptor for transparent encryption
-            )
-            
-            # Ensure mapping table exists
-            mapping_manager.create_table()
-            mapping_manager.validate_schema()
-            
-            print(f"  [OK] Mapping capture enabled")
-            if encryption_enabled:
-                print(f"  [OK] Mapping values will be encrypted at rest")
-            print(f"  [OK] Batch ID: {batch_id[:8]}...")
-            print(f"  [OK] Run ID: {sanitization_run_id[:8]}...")
-        except Exception as e:
-            logger.error(f"  [WARN] Mapping capture initialization failed: {e}")
-            logger.error(f"  [WARN] Continuing without mapping capture")
-            mapping_manager = None
-            schema_inspector = None
-    else:
-        if dry_run and skip_on_dry_run:
-            print(f"  [OK] Mapping capture skipped (dry-run mode)")
-        else:
-            print(f"  [OK] Mapping capture disabled in configuration")
-    
     # Sanitize each PII column
     print(f"\n[5/6] Sanitizing PII columns")
     
     total_rows = 0
-    total_mappings = 0
     successful = 0
     failed = 0
-    results = []
     
     pii_columns = config.get('pii_columns', [])
     
@@ -1331,17 +1091,11 @@ def main():
         print(f"\n[{i}/{len(pii_columns)}] Sanitizing {schema}.{table}.{column}")
         
         try:
-            result = sanitize_column(
+            rows = sanitize_column(
                 conn, schema, table, column, pii_type,
-                masker_engine, dry_run,
-                schema_inspector=schema_inspector,
-                mapping_manager=mapping_manager,
-                batch_id=batch_id,
-                sanitization_run_id=sanitization_run_id
+                masker_engine, dry_run
             )
-            results.append(result)
-            total_rows += result.get('rows_updated', 0)
-            total_mappings += result.get('mappings_captured', 0)
+            total_rows += rows
             successful += 1
         except Exception as e:
             print(f"     [ERR] Unexpected error: {e}")
@@ -1375,18 +1129,6 @@ def main():
         print(f"  Would update: {total_rows:,} (DRY-RUN)")
     else:
         print(f"  Updated: {total_rows:,}")
-    
-    # Mapping capture statistics
-    if total_mappings > 0 or (mapping_enabled and not (dry_run and skip_on_dry_run)):
-        print(f"\nMapping Capture:")
-        if dry_run:
-            print(f"  Would capture: {total_mappings:,} mappings (DRY-RUN)")
-        else:
-            print(f"  Captured: {total_mappings:,} mappings")
-            print(f"  Batch ID: {batch_id}")
-            print(f"  Run ID: {sanitization_run_id}")
-            print(f"  [SUCCESS] Mappings committed atomically with updates")
-            print(f"  [INFO] Desanitization is now possible for this run")
     
     print(f"\nSmart Generation:")
     print(f"  [SUCCESS] All maskers use constraint-aware generation")

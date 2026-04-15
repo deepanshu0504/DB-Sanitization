@@ -22,6 +22,87 @@ A comprehensive, domain-agnostic Python framework for sanitizing Microsoft SQL S
 - 🌐 **Domain Agnostic** - Works across healthcare, retail, finance, e-commerce, and any other domain
 - 🛡️ **Security First** - No PII logging, encrypted mappings, parameterized queries
 
+## 🔄 Reversible Sanitization (NEW)
+
+The framework now supports **reversible sanitization** through persistent mapping tables, enabling you to restore original data when authorized.
+
+### Quick Setup
+
+```bash
+# 1. Create mapping table
+sqlcmd -S YourServer -d YourDatabase -i scripts/create_mapping_table.sql
+
+# 2. Enable mapping capture in your config
+# Add to config/pii_config.production.json:
+{
+  "use_mapping_capture": true,
+  "mapping_table_name": "token_mappings"
+}
+
+# 3. Run sanitization (mappings captured automatically)
+python sanitize_smart.py config/pii_config.production.json
+```
+
+### Python API
+
+```python
+from mapping.mapping_table_manager import MappingTableManager, MappingRecord
+
+# Initialize
+manager = MappingTableManager(connection_string)
+manager.create_table()
+
+# Query mappings for desanitization
+results = manager.get_mappings(
+    table_name="Customers",
+    column_name="Email",
+    record_ids=["123", "456"]
+)
+
+# Composite primary key support
+composite_pk = manager.serialize_composite_pk({
+    "CustomerID": 123,
+    "OrderID": 456
+})
+```
+
+**Features:**
+- ✅ Persistent mapping table with optimized indexes
+- ✅ Composite primary key support via JSON serialization
+- ✅ Bulk insert performance (<1 second for 10K mappings)
+- ✅ Schema validation with actionable error messages
+- ✅ Transaction-safe batch operations
+- ✅ Encryption at rest (Story 1.3 - AES-256-GCM)
+- ✅ Desanitization engine (Stories 2.1-2.4 - All levels complete)
+- ✅ Incremental desanitization (Story 5.2 - Time-based filtering, rate limiting, ETA)
+- 🚧 Parallel desanitization (Story 5.1)
+- 🚧 Role-based access control (Story 7.1)
+
+See **[docs/USER_STORIES_DESANITIZATION.md](docs/USER_STORIES_DESANITIZATION.md)** for complete implementation roadmap.
+
+## Recent Updates (April 13, 2026)
+
+**🚀 Story 5.2: Incremental Desanitization - Now Available**
+
+- **Time-Based Filtering**: Restore only mappings from specific date ranges using `--date-range`
+- **Rate Limiting**: Add delays between column restorations for production-safe operations with `--rate-limit`
+- **Enhanced Progress Tracking**: ETA with estimated completion time displayed every 10 tables and hourly
+- **Multi-Shift Workflows**: Resume capability supports incremental restoration across multiple work shifts
+- **Optimized Performance**: New composite index (`IX_token_mappings_created_at`) provides 10-100x speedup for date-filtered queries
+
+```bash
+# Example: Restore last week's data with throttling
+python desanitize_direct.py \
+  --database \
+  --date-range "2026-04-06:2026-04-13" \
+  --rate-limit 1000 \
+  --execute
+```
+
+Learn more in the **[Incremental Desanitization Guide](docs/DESANITIZATION_GUIDE.md#incremental-desanitization-story-52)**.
+
+---
+
 ## Current Status: Phase 1 - Foundation
 
 ✅ **Story 1.1: Database Connection Manager** (COMPLETED)

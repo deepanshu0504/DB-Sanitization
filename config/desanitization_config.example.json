@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Desanitization Configuration",
+  "description": "Configuration file for database desanitization operations. This file demonstrates all available configuration options with recommended defaults.",
+  
+  "database": {
+    "server": "localhost",
+    "database": "YourDatabaseName",
+    "auth_type": "windows",
+    "username": null,
+    "password": null,
+    "timeout": 30,
+    "max_retries": 3,
+    "pool_size": 5,
+    "environment": "development"
+  },
+  
+  "mapping": {
+    "table_name": "token_mappings",
+    "schema_name": "dbo",
+    "encryption": {
+      "enabled": false,
+      "key_env_var": "MAPPING_ENCRYPTION_KEY",
+      "fallback_keys_env_vars": []
+    }
+  },
+  
+  "restoration": {
+    "dry_run": true,
+    "skip_verification": false,
+    "strict": false,
+    "skip_audit": false,
+    "skip_missing": false
+  },
+  
+  "performance": {
+    "enable_parallel": false,
+    "max_workers": 4,
+    "rate_limit_ms": 0,
+    "batch_size": 10000
+  },
+  
+  "checkpoint": {
+    "operation_id": null,
+    "clear_stale": false,
+    "stale_threshold_hours": 24
+  },
+  
+  "security": {
+    "_comment": "Role-Based Access Control (RBAC) for desanitization operations - Story 7.1",
+    "_description": "Controls who can perform desanitization operations based on database role membership",
+    
+    "enabled": false,
+    "_enabled_comment": "Set to true to require role membership for desanitization. Default: false (backward compatible)",
+    "_enabled_example": "When enabled, users must be members of at least one 'allowed_roles' to perform desanitization",
+    
+    "allowed_roles": ["DataRestorer", "db_owner", "db_datawriter"],
+    "_allowed_roles_comment": "List of database roles permitted to perform desanitization operations",
+    "_allowed_roles_builtin": "Built-in roles: db_owner, db_datawriter, db_datareader, db_ddladmin",
+    "_allowed_roles_custom": "Custom roles: Create with 'CREATE ROLE DataRestorer'; Grant with: EXEC sp_addrolemember 'DataRestorer', 'DOMAIN\\username'",
+    "_allowed_roles_example": "User must be member of ANY role in list (OR logic, not AND)",
+    
+    "require_role_for_dry_run": false,
+    "_require_role_for_dry_run_comment": "If true, requires role membership even for dry-run/preview operations. Default: false",
+    "_require_role_for_dry_run_use_case": "Set to false to allow read-only users to preview desanitization without committing",
+    
+    "deny_on_role_check_failure": true,
+    "_deny_on_role_check_failure_comment": "If role validation fails (e.g., DB error), deny access. Default: true (fail-safe)",
+    "_deny_on_role_check_failure_security": "Recommended: true for production (security over availability)"
+  },
+  
+  "validation": {
+    "skip_pre_validation": false,
+    "strict_verification": false,
+    "enable_fk_validation": true,
+    "enable_row_count_check": true
+  },
+  
+  "audit": {
+    "enabled": true,
+    "table_name": "desanitization_audit_log",
+    "schema_name": "dbo"
+  }
+}

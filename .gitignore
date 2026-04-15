@@ -95,3 +95,6 @@ dmypy.json
 
 # pylint
 .pylint.d/
+# Output files
+sanitize_output.txt
+nul

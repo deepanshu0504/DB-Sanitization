@@ -15,6 +15,28 @@
     "enable_parallel_processing": true,
     "max_parallel_tables": 4
   },
+  "mapping_capture": {
+    "enabled": true,
+    "skip_on_dry_run": true,
+    "batch_size": 5000,
+    "performance_threshold_percent": 5,
+    "_comment": "Mapping capture enables reversible sanitization (desanitization). Set 'enabled': false to disable. 'skip_on_dry_run': true prevents mapping creation during dry runs. Performance threshold alerts if overhead exceeds specified percentage."
+  },
+  "mapping_encryption": {
+    "enabled": false,
+    "key_source": "environment",
+    "key_env_var": "MAPPING_ENCRYPTION_KEY",
+    "fallback_keys_env_vars": [],
+    "performance_threshold_percent": 10,
+    "_comment": "Story 1.3: Encryption at rest for mapping table values. Uses AES-256-GCM authenticated encryption. Set 'enabled': true to encrypt original_value and masked_value columns. 'key_source' options: 'environment' (current), 'azure_key_vault' (future). Generate key: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\". Store key in environment variable specified by 'key_env_var'. For key rotation, add old keys to 'fallback_keys_env_vars'. Performance threshold alerts if encryption overhead exceeds specified percentage (default: 10%)."
+  },
+  "mapping_performance": {
+    "cache_enabled": false,
+    "cache_size": 10000,
+    "cache_ttl_seconds": null,
+    "auto_analyze_performance": false,
+    "_comment": "Story 5.3: Performance optimization for mapping lookups. 'cache_enabled': Enable LRU cache for frequently accessed mappings (reduces database load). 'cache_size': Maximum cache entries (default: 10000, recommended 10% of distinct masked values). 'cache_ttl_seconds': Optional time-to-live for cache entries in seconds (null = no expiration, mappings cached until eviction). 'auto_analyze_performance': Automatically log query performance metrics (disable in production). Caching recommended for repeated desanitizations of same batch. Monitor hit rate with MappingTableManager.cache.get_metrics()."
+  },
   "logging": {
     "level": "INFO",
     "handlers": [

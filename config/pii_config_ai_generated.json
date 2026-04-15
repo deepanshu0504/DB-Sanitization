@@ -13,46 +13,18 @@
   },
   "pii_columns": [
     {
-      "schema": "dbo",
-      "table": "DatabaseLog",
-      "column": "DatabaseUser",
-      "pii_type": "name",
-      "nullable": true
-    },
-    {
-      "schema": "dbo",
-      "table": "ErrorLog",
-      "column": "UserName",
-      "pii_type": "name",
-      "nullable": true
-    },
-    {
       "schema": "HumanResources",
       "table": "Employee",
       "column": "NationalIDNumber",
       "pii_type": "ssn",
-      "nullable": true
-    },
-    {
-      "schema": "HumanResources",
-      "table": "Employee",
-      "column": "LoginID",
-      "pii_type": "generic",
-      "nullable": true
-    },
-    {
-      "schema": "HumanResources",
-      "table": "Employee",
-      "column": "BirthDate",
-      "pii_type": "generic",
-      "nullable": true
+      "nullable": false
     },
     {
       "schema": "Person",
       "table": "Address",
       "column": "AddressLine1",
       "pii_type": "address",
-      "nullable": true
+      "nullable": false
     },
     {
       "schema": "Person",
@@ -66,14 +38,14 @@
       "table": "Address",
       "column": "City",
       "pii_type": "address",
-      "nullable": true
+      "nullable": false
     },
     {
       "schema": "Person",
       "table": "Address",
       "column": "PostalCode",
       "pii_type": "address",
-      "nullable": true
+      "nullable": false
     },
     {
       "schema": "Person",
@@ -85,16 +57,9 @@
     {
       "schema": "Person",
       "table": "Person",
-      "column": "Title",
-      "pii_type": "name",
-      "nullable": true
-    },
-    {
-      "schema": "Person",
-      "table": "Person",
       "column": "FirstName",
       "pii_type": "name",
-      "nullable": true
+      "nullable": false
     },
     {
       "schema": "Person",
@@ -108,21 +73,35 @@
       "table": "Person",
       "column": "LastName",
       "pii_type": "name",
-      "nullable": true
+      "nullable": false
     },
     {
       "schema": "Person",
-      "table": "PersonPhone",
-      "column": "PhoneNumber",
-      "pii_type": "phone",
+      "table": "Person",
+      "column": "Title",
+      "pii_type": "name",
       "nullable": true
     },
     {
+      "schema": "Production",
+      "table": "ProductReview",
+      "column": "ReviewerName",
+      "pii_type": "name",
+      "nullable": false
+    },
+    {
+      "schema": "Production",
+      "table": "ProductReview",
+      "column": "EmailAddress",
+      "pii_type": "email",
+      "nullable": false
+    },
+    {
       "schema": "Sales",
-      "table": "Customer",
-      "column": "AccountNumber",
+      "table": "CreditCard",
+      "column": "CardNumber",
       "pii_type": "generic",
-      "nullable": true
+      "nullable": false
     },
     {
       "schema": "Sales",
@@ -140,27 +119,34 @@
     },
     {
       "schema": "Sales",
-      "table": "CreditCard",
-      "column": "CardNumber",
-      "pii_type": "generic",
-      "nullable": true
-    },
-    {
-      "schema": "Production",
-      "table": "ProductReview",
-      "column": "ReviewerName",
+      "table": "SalesReason",
+      "column": "Name",
       "pii_type": "name",
-      "nullable": true
+      "nullable": false
     },
     {
-      "schema": "Production",
-      "table": "ProductReview",
-      "column": "EmailAddress",
-      "pii_type": "email",
-      "nullable": true
+      "schema": "Sales",
+      "table": "SalesTaxRate",
+      "column": "Name",
+      "pii_type": "name",
+      "nullable": false
+    },
+    {
+      "schema": "Sales",
+      "table": "SalesTerritory",
+      "column": "Name",
+      "pii_type": "name",
+      "nullable": false
+    },
+    {
+      "schema": "Sales",
+      "table": "Store",
+      "column": "Name",
+      "pii_type": "name",
+      "nullable": false
     }
   ],
-  "dry_run": true,
+  "dry_run": false,
   "validate_before": true,
   "validate_after": true
 }
