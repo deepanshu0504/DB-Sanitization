@@ -6,6 +6,7 @@ A comprehensive, domain-agnostic Python framework for sanitizing Microsoft SQL S
 
 - **[Quick Start Guide](docs/QUICK_START.md)** - Get started in 15 minutes (installation + first sanitization)
 - **[Workflow Guide](docs/WORKFLOW_GUIDE.md)** - Complete documentation: prerequisites, usage, troubleshooting, best practices
+- **[Desanitization Guide](docs/DESANITIZATION_GUIDE.md)** - Complete guide to restoring original PII values
 - **[Cheat Sheet](docs/CHEAT_SHEET.md)** - Quick reference: commands, SQL queries, configurations
 - **[Troubleshooting FAQ](docs/TROUBLESHOOTING.md)** - Common issues and solutions with detailed fixes
 - **[User Stories](docs/USER_STORIES.md)** - Development phases and implementation status
@@ -16,11 +17,12 @@ A comprehensive, domain-agnostic Python framework for sanitizing Microsoft SQL S
 - 🔒 **AI-Powered PII Detection** - Automatically identify PII columns using GitHub Copilot API
 - 🎭 **Intelligent Data Masking** - Deterministic masking strategies for emails, phones, names, SSNs, and more
 - 🎯 **Smart Generation** - Format-adaptive masking ensures all fake values fit within column constraints without truncation
-- 🔄 **Reversible Sanitization** - Mapping tables enable data restoration when needed
+- 🔄 **Reversible Sanitization** - Mapping tables with AES-256 encryption enable complete data restoration when needed
 - ⚡ **High Performance** - Batch processing with connection pooling handles millions of rows efficiently
 - 🔗 **Referential Integrity** - Preserves foreign key relationships and handles circular dependencies
 - 🌐 **Domain Agnostic** - Works across healthcare, retail, finance, e-commerce, and any other domain
-- 🛡️ **Security First** - No PII logging, encrypted mappings, parameterized queries
+- 🛡️ **Security First** - Encrypted mappings, parameterized queries, no PII logging
+- 🔓 **Complete Desanitization** - Full or selective restoration of original values from encrypted mappings
 
 ## Current Status: Phase 1 - Foundation
 

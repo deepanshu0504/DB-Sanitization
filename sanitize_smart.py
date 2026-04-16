@@ -24,10 +24,25 @@ import pyodbc
 import hashlib
 import random
 import string
+import os
 from typing import Dict, List, Any, Optional, Tuple, Union
 from datetime import datetime, date, timedelta
 from collections import defaultdict
 from dataclasses import dataclass
+from uuid import UUID, uuid4
+
+# Import mapping modules for desanitization support
+try:
+    from mapping import (
+        EncryptionManager,
+        MappingManager,
+        create_mapping_entry,
+        EncryptionKeyError
+    )
+    MAPPING_AVAILABLE = True
+except ImportError:
+    MAPPING_AVAILABLE = False
+    print("[WARN] Mapping modules not available - desanitization disabled")
 # ================================
 # Dynamic Name Component Detection
 # ================================
@@ -856,7 +871,10 @@ def sanitize_column(
     column: str,
     pii_type: str,
     masker_engine: SmartMaskerEngine,
-    dry_run: bool = True
+    dry_run: bool = True,
+    mapping_manager: Optional['MappingManager'] = None,
+    operation_id: Optional[UUID] = None,
+    encryption_manager: Optional['EncryptionManager'] = None
 ) -> int:
     """
     Sanitize a single column using Smart Generation.
@@ -869,6 +887,9 @@ def sanitize_column(
         pii_type: Type of PII for masking strategy
         masker_engine: SmartMaskerEngine instance
         dry_run: If True, don't actually update database
+        mapping_manager: Optional MappingManager for capturing original→masked mappings
+        operation_id: Optional UUID for this sanitization operation
+        encryption_manager: Optional EncryptionManager for encrypting original values
         
     Returns:
         Number of rows updated
@@ -889,10 +910,43 @@ def sanitize_column(
         
         # Process and build update mappings
         updates = []
+        mapping_entries = []  # For desanitization support
+        
         for row in cursor.fetchall():
             original = row[0]
             masked = masker_engine.mask_value(original, pii_type, column_info)
             updates.append((original, masked))  # (original, masked) for temp table insert
+            
+            # Capture mapping for desanitization (if enabled)
+            if mapping_manager and operation_id and MAPPING_AVAILABLE:
+                # Store original value - encrypted if encryption_manager available, else plaintext as bytes
+                encrypted_original = None
+                if encryption_manager:
+                    try:
+                        encrypted_original = encryption_manager.encrypt(original)
+                    except Exception as enc_err:
+                        print(f"     [WARN] Encryption failed for value: {str(enc_err)[:50]}")
+                        # Fallback to plaintext on encryption failure
+                        encrypted_original = original.encode('utf-8')
+                else:
+                    # No encryption available - store plaintext as bytes for desanitization
+                    encrypted_original = original.encode('utf-8')
+                
+                # Create mapping entry
+                try:
+                    entry = create_mapping_entry(
+                        operation_id=operation_id,
+                        schema=schema,
+                        table=table,
+                        column=column,
+                        original_value=original,
+                        masked_value=masked,
+                        data_type=column_info.data_type,
+                        encrypted_original=encrypted_original
+                    )
+                    mapping_entries.append(entry)
+                except Exception as map_err:
+                    print(f"     [WARN] Failed to create mapping entry: {str(map_err)[:50]}")
         
         cursor.close()
         
@@ -944,7 +998,16 @@ def sanitize_column(
                 if rows_affected == -1:
                     rows_affected = len(updates)
                 
-                print(f"     [OK] Updated {rows_affected:,} rows")
+                # Store mappings after successful update (if enabled)
+                if mapping_entries and mapping_manager and not dry_run:
+                    try:
+                        stats = mapping_manager.store_mappings(mapping_entries)
+                        print(f"     [OK] Updated {rows_affected:,} rows | Stored {stats.total_mappings} mappings")
+                    except Exception as mapping_err:
+                        print(f"     [OK] Updated {rows_affected:,} rows | [WARN] Mapping storage failed: {str(mapping_err)[:50]}")
+                else:
+                    print(f"     [OK] Updated {rows_affected:,} rows")
+                
                 return rows_affected
                 
             except pyodbc.Error as inner_e:
@@ -1073,6 +1136,47 @@ def main():
         print(f"  [ERR] Initialization failed: {e}")
         sys.exit(1)
     
+    # Initialize mapping capture for desanitization (if available)
+    operation_id = uuid4()
+    encryption_manager = None
+    mapping_manager = None
+    
+    if MAPPING_AVAILABLE and not dry_run:
+        print(f"\n[4b/6] Initializing mapping capture for desanitization")
+        print(f"  Operation ID: {operation_id}")
+        
+        # Initialize encryption manager
+        try:
+            encryption_manager = EncryptionManager()
+            print(f"  [OK] Encryption enabled: {encryption_manager.get_key_info()['algorithm']}")
+        except EncryptionKeyError as enc_err:
+            print(f"  [WARN] Encryption disabled: {str(enc_err)[:80]}")
+            print(f"  [INFO] Mappings will be stored without encryption")
+            encryption_manager = None
+        except Exception as enc_err:
+            print(f"  [WARN] Encryption initialization failed: {str(enc_err)[:80]}")
+            encryption_manager = None
+        
+        # Initialize mapping manager
+        try:
+            mapping_manager = MappingManager(
+                connection_string=conn_string,
+                encryption_manager=encryption_manager
+            )
+            mapping_manager.initialize()
+            print(f"  [OK] Mapping table initialized: dbo.pii_mappings")
+            print(f"  [OK] Desanitization support enabled")
+        except Exception as map_err:
+            print(f"  [WARN] Mapping manager initialization failed: {str(map_err)[:80]}")
+            print(f"  [INFO] Continuing without mapping capture")
+            mapping_manager = None
+    elif dry_run:
+        print(f"\n[4b/6] Mapping capture - Skipped (dry-run mode)")
+        print(f"  [INFO] Enable mapping capture by setting dry_run=false")
+    else:
+        print(f"\n[4b/6] Mapping capture - Not Available")
+        print(f"  [WARN] Mapping modules not installed - desanitization disabled")
+    
     # Sanitize each PII column
     print(f"\n[5/6] Sanitizing PII columns")
     
@@ -1093,7 +1197,10 @@ def main():
         try:
             rows = sanitize_column(
                 conn, schema, table, column, pii_type,
-                masker_engine, dry_run
+                masker_engine, dry_run,
+                mapping_manager=mapping_manager,
+                operation_id=operation_id,
+                encryption_manager=encryption_manager
             )
             total_rows += rows
             successful += 1
@@ -1134,6 +1241,24 @@ def main():
     print(f"  [SUCCESS] All maskers use constraint-aware generation")
     print(f"  [SUCCESS] Zero truncation errors expected")
     print(f"  [SUCCESS] All fake values fit column constraints perfectly")
+    
+    if mapping_manager and not dry_run:
+        print(f"\nDesanitization:")
+        try:
+            stats = mapping_manager.get_stats(operation_id)
+            print(f"  [SUCCESS] Mappings captured: {stats.total_mappings:,}")
+            print(f"  [SUCCESS] Tables tracked: {stats.tables_affected}")
+            
+            # Show encryption status
+            if encryption_manager:
+                print(f"  [SUCCESS] Values encrypted: {stats.encrypted_count:,} (AES-256)")
+            else:
+                print(f"  [SUCCESS] Values stored: {stats.encrypted_count:,} (plaintext - set SANITIZATION_ENCRYPTION_KEY for encryption)")
+            
+            print(f"  [INFO] Operation ID: {operation_id}")
+            print(f"  [TIP] To restore original data, use: python desanitize.py {operation_id}")
+        except Exception as stats_err:
+            print(f"  [WARN] Could not retrieve mapping stats: {str(stats_err)[:80]}")
     
     if dry_run:
         print(f"\n[TIP] To execute actual sanitization:")
