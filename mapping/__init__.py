@@ -68,6 +68,17 @@ from mapping.mapping_manager import (
     MappingError
 )
 
+from mapping.pk_utils import (
+    PrimaryKeyInfo,
+    get_primary_key_columns,
+    get_primary_key_cached,
+    extract_pk_values,
+    pk_values_to_json,
+    pk_values_from_json,
+    build_pk_where_clause,
+    clear_pk_cache
+)
+
 __all__ = [
     # Encryption
     'EncryptionManager',
@@ -89,6 +100,16 @@ __all__ = [
     # Manager
     'MappingManager',
     'MappingError',
+    
+    # Primary Key Utils
+    'PrimaryKeyInfo',
+    'get_primary_key_columns',
+    'get_primary_key_cached',
+    'extract_pk_values',
+    'pk_values_to_json',
+    'pk_values_from_json',
+    'build_pk_where_clause',
+    'clear_pk_cache',
 ]
 
 __version__ = '1.0.0'

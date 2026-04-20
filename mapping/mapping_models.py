@@ -15,9 +15,26 @@ Date: 2026-04-16
 
 import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Optional, List
+from datetime import datetime, date
+from typing import Optional, List, Any
 from uuid import UUID
+from decimal import Decimal
+
+
+def _value_to_string(value: Any) -> str:
+    """Convert any value to string for encoding/hashing."""
+    if value is None:
+        return ""
+    elif isinstance(value, str):
+        return value
+    elif isinstance(value, (datetime, date)):
+        return value.isoformat()
+    elif isinstance(value, (int, float, Decimal)):
+        return str(value)
+    elif isinstance(value, bytes):
+        return value.decode('utf-8')
+    else:
+        return str(value)
 
 
 @dataclass
@@ -76,6 +93,8 @@ class MappingEntry:
     masked_value: Optional[str]  # NVARCHAR(MAX) - the fake value
     data_type: str  # SQL Server data type (VARCHAR, NVARCHAR, CHAR, etc.)
     is_null: bool  # True if original value was NULL
+    primary_key_columns: Optional[str] = None  # JSON array of PK column names
+    primary_key_values: Optional[str] = None  # JSON array of PK values
     created_at: datetime = field(default_factory=datetime.utcnow)
     
     def __post_init__(self):
@@ -275,7 +294,9 @@ def create_mapping_entry(
     original_value: Optional[str],
     masked_value: Optional[str],
     data_type: str,
-    encrypted_original: Optional[bytes] = None
+    encrypted_original: Optional[bytes] = None,
+    primary_key_columns: Optional[str] = None,
+    primary_key_values: Optional[str] = None
 ) -> MappingEntry:
     """
     Factory function to create a MappingEntry with automatic hash generation.
@@ -289,6 +310,8 @@ def create_mapping_entry(
         masked_value: Masked/fake value (None for NULL)
         data_type: SQL Server data type
         encrypted_original: Pre-encrypted original value (optional)
+        primary_key_columns: JSON array of PK column names (optional)
+        primary_key_values: JSON array of PK values (optional)
     
     Returns:
         MappingEntry with computed hash
@@ -302,7 +325,9 @@ def create_mapping_entry(
             column="Email",
             original_value="john@example.com",
             masked_value="user_a1b2c3d4@example.com",
-            data_type="NVARCHAR(100)"
+            data_type="NVARCHAR(100)",
+            primary_key_columns='["CustomerID"]',
+            primary_key_values='[12345]'
         )
         ```
     """
@@ -314,8 +339,9 @@ def create_mapping_entry(
         # Use special hash for NULL values
         original_hash = hashlib.sha256(b"__NULL__").digest()
     else:
-        # Hash the actual value
-        original_hash = hashlib.sha256(original_value.encode('utf-8')).digest()
+        # Convert to string first (handles dates, numbers, etc.), then hash
+        value_str = _value_to_string(original_value)
+        original_hash = hashlib.sha256(value_str.encode('utf-8')).digest()
     
     return MappingEntry(
         operation_id=operation_id,
@@ -326,7 +352,9 @@ def create_mapping_entry(
         original_value_encrypted=encrypted_original,
         masked_value=masked_value,
         data_type=data_type,
-        is_null=is_null
+        is_null=is_null,
+        primary_key_columns=primary_key_columns,
+        primary_key_values=primary_key_values
     )
 
 

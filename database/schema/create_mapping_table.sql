@@ -2,8 +2,10 @@
 -- PII Mappings Table Creation Script
 -- ================================================================
 -- Purpose: Store original→masked value mappings for desanitization
+--          with primary key tracking for accurate row-level restoration
 -- Author: Database Sanitization Team
 -- Date: 2026-04-16
+-- Version: 2.0 (with PK tracking)
 -- ================================================================
 
 -- Drop existing table if exists (for development/testing only)
@@ -36,6 +38,10 @@ BEGIN
         original_value_hash VARBINARY(32) NOT NULL,  -- SHA-256 hash for indexing
         original_value_encrypted VARBINARY(MAX),     -- AES-256 encrypted original value
         masked_value NVARCHAR(MAX),                  -- Fake value (plaintext)
+        
+        -- Primary key tracking (for row-specific restoration)
+        primary_key_columns NVARCHAR(MAX),           -- JSON array of PK column names
+        primary_key_values NVARCHAR(MAX),            -- JSON array of PK values
         
         -- Metadata
         data_type NVARCHAR(128) NOT NULL,            -- SQL Server data type
@@ -133,6 +139,31 @@ BEGIN
 END
 GO
 
+-- Index 4: PK-based restoration (for accurate row matching)
+-- Used when restoring specific rows by primary key during desanitization
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes 
+    WHERE object_id = OBJECT_ID('dbo.pii_mappings') 
+    AND name = 'IX_pii_mappings_pk_restore'
+)
+BEGIN
+    CREATE NONCLUSTERED INDEX IX_pii_mappings_pk_restore
+    ON dbo.pii_mappings (
+        operation_id,
+        schema_name,
+        table_name,
+        column_name
+    )
+    INCLUDE (primary_key_columns, primary_key_values, original_value_encrypted, masked_value, is_null);
+    
+    PRINT 'Index IX_pii_mappings_pk_restore created successfully';
+END
+ELSE
+BEGIN
+    PRINT 'Index IX_pii_mappings_pk_restore already exists - skipping';
+END
+GO
+
 -- ================================================================
 -- Verification Query
 -- ================================================================
@@ -158,7 +189,8 @@ PRINT '================================================================';
 PRINT 'PII Mappings Table Setup Complete';
 PRINT '================================================================';
 PRINT 'Table: dbo.pii_mappings';
-PRINT 'Indexes: 3 (PK + 2 nonclustered)';
+PRINT 'Indexes: 4 (PK + 3 nonclustered)';
+PRINT 'Features: Value storage + Primary Key tracking for accurate restoration';
 PRINT 'Ready for mapping capture during sanitization';
 PRINT '================================================================';
 GO

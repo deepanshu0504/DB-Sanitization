@@ -27,9 +27,27 @@ import string
 import os
 from typing import Dict, List, Any, Optional, Tuple, Union
 from datetime import datetime, date, timedelta
+from decimal import Decimal
 from collections import defaultdict
 from dataclasses import dataclass
 from uuid import UUID, uuid4
+
+
+def _safe_encode(value: Any) -> bytes:
+    """Safely encode any value to bytes (handles dates, numbers, etc.)."""
+    if value is None:
+        return b""
+    elif isinstance(value, bytes):
+        return value
+    elif isinstance(value, str):
+        return value.encode('utf-8')
+    elif isinstance(value, (datetime, date)):
+        return value.isoformat().encode('utf-8')
+    elif isinstance(value, (int, float, Decimal)):
+        return str(value).encode('utf-8')
+    else:
+        return str(value).encode('utf-8')
+
 
 # Import mapping modules for desanitization support
 try:
@@ -872,6 +890,7 @@ def sanitize_column(
     pii_type: str,
     masker_engine: SmartMaskerEngine,
     dry_run: bool = True,
+    connection_string: Optional[str] = None,
     mapping_manager: Optional['MappingManager'] = None,
     operation_id: Optional[UUID] = None,
     encryption_manager: Optional['EncryptionManager'] = None
@@ -887,6 +906,7 @@ def sanitize_column(
         pii_type: Type of PII for masking strategy
         masker_engine: SmartMaskerEngine instance
         dry_run: If True, don't actually update database
+        connection_string: Database connection string (for PK detection)
         mapping_manager: Optional MappingManager for capturing original→masked mappings
         operation_id: Optional UUID for this sanitization operation
         encryption_manager: Optional EncryptionManager for encrypting original values
@@ -903,8 +923,24 @@ def sanitize_column(
         print(f"     Type: {pii_type}")
         print(f"     Column: {column_info.data_type}({column_info.max_length})")
         
-        # Fetch current values
-        select_query = f"SELECT [{column}] FROM {fully_qualified} WHERE [{column}] IS NOT NULL"
+        # Detect primary key columns for row-specific restoration
+        pk_info = None
+        pk_columns_str = None
+        if mapping_manager and operation_id and MAPPING_AVAILABLE and connection_string:
+            try:
+                from mapping import get_primary_key_cached
+                pk_info = get_primary_key_cached(connection_string, schema, table)
+                if pk_info:
+                    pk_columns_str = ','.join([f"[{pk_col}]" for pk_col in pk_info.pk_columns])
+            except Exception as pk_err:
+                print(f"     [WARN] Could not detect primary key: {str(pk_err)[:50]}")
+        
+        # Build SELECT query with PK columns if available
+        if pk_info and pk_columns_str:
+            select_query = f"SELECT {pk_columns_str}, [{column}] FROM {fully_qualified} WHERE [{column}] IS NOT NULL"
+        else:
+            select_query = f"SELECT [{column}] FROM {fully_qualified} WHERE [{column}] IS NOT NULL"
+        
         cursor = conn.cursor()
         cursor.execute(select_query)
         
@@ -913,7 +949,25 @@ def sanitize_column(
         mapping_entries = []  # For desanitization support
         
         for row in cursor.fetchall():
-            original = row[0]
+            # Extract PK values if available
+            if pk_info:
+                from mapping import extract_pk_values, pk_values_to_json
+                try:
+                    pk_values = extract_pk_values(row, pk_info.pk_columns)
+                    pk_values_json = pk_values_to_json(pk_values)
+                    pk_columns_json = pk_info.to_json()
+                    # Original value is after PK columns
+                    original = row[len(pk_info.pk_columns)]
+                except Exception as pk_extract_err:
+                    print(f"     [WARN] Failed to extract PK values: {str(pk_extract_err)[:50]}")
+                    pk_values_json = None
+                    pk_columns_json = None
+                    original = row[0]
+            else:
+                pk_values_json = None
+                pk_columns_json = None
+                original = row[0]
+            
             masked = masker_engine.mask_value(original, pii_type, column_info)
             updates.append((original, masked))  # (original, masked) for temp table insert
             
@@ -927,12 +981,12 @@ def sanitize_column(
                     except Exception as enc_err:
                         print(f"     [WARN] Encryption failed for value: {str(enc_err)[:50]}")
                         # Fallback to plaintext on encryption failure
-                        encrypted_original = original.encode('utf-8')
+                        encrypted_original = _safe_encode(original)
                 else:
                     # No encryption available - store plaintext as bytes for desanitization
-                    encrypted_original = original.encode('utf-8')
+                    encrypted_original = _safe_encode(original)
                 
-                # Create mapping entry
+                # Create mapping entry with PK information
                 try:
                     entry = create_mapping_entry(
                         operation_id=operation_id,
@@ -942,7 +996,9 @@ def sanitize_column(
                         original_value=original,
                         masked_value=masked,
                         data_type=column_info.data_type,
-                        encrypted_original=encrypted_original
+                        encrypted_original=encrypted_original,
+                        primary_key_columns=pk_columns_json,
+                        primary_key_values=pk_values_json
                     )
                     mapping_entries.append(entry)
                 except Exception as map_err:
@@ -1198,6 +1254,7 @@ def main():
             rows = sanitize_column(
                 conn, schema, table, column, pii_type,
                 masker_engine, dry_run,
+                connection_string=conn_string,
                 mapping_manager=mapping_manager,
                 operation_id=operation_id,
                 encryption_manager=encryption_manager

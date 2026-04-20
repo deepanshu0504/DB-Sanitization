@@ -300,9 +300,11 @@ class MappingManager:
                             masked_value,
                             data_type,
                             is_null,
+                            primary_key_columns,
+                            primary_key_values,
                             created_at
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """
                     
                     # Prepare batch data
@@ -318,6 +320,8 @@ class MappingManager:
                             entry.masked_value,
                             entry.data_type,
                             1 if entry.is_null else 0,
+                            entry.primary_key_columns,
+                            entry.primary_key_values,
                             entry.created_at
                         ))
                         
@@ -398,6 +402,8 @@ class MappingManager:
                 masked_value,
                 data_type,
                 is_null,
+                primary_key_columns,
+                primary_key_values,
                 created_at
             FROM {full_table}
             WHERE operation_id = ?
@@ -436,6 +442,8 @@ class MappingManager:
                         masked_value=row.masked_value,
                         data_type=row.data_type,
                         is_null=bool(row.is_null),
+                        primary_key_columns=row.primary_key_columns,
+                        primary_key_values=row.primary_key_values,
                         created_at=row.created_at
                     )
                     entries.append(entry)

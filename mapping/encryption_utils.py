@@ -35,8 +35,26 @@ Date: 2026-04-16
 
 import os
 import base64
-from typing import Optional, Union
+from datetime import datetime, date
+from decimal import Decimal
+from typing import Optional, Union, Any
 from cryptography.fernet import Fernet, InvalidToken
+
+
+def _value_to_string(value: Any) -> str:
+    """Convert any value to string for encoding."""
+    if value is None:
+        return ""
+    elif isinstance(value, str):
+        return value
+    elif isinstance(value, (datetime, date)):
+        return value.isoformat()
+    elif isinstance(value, (int, float, Decimal)):
+        return str(value)
+    elif isinstance(value, bytes):
+        return value.decode('utf-8')
+    else:
+        return str(value)
 
 
 class EncryptionError(Exception):
@@ -158,8 +176,9 @@ class EncryptionManager:
             return None
         
         try:
-            # Convert string to bytes and encrypt
-            plaintext_bytes = plaintext.encode('utf-8')
+            # Convert to string first (handles dates, numbers, etc.), then encrypt
+            plaintext_str = _value_to_string(plaintext)
+            plaintext_bytes = plaintext_str.encode('utf-8')
             encrypted_bytes = self._fernet.encrypt(plaintext_bytes)
             return encrypted_bytes
         except Exception as e:

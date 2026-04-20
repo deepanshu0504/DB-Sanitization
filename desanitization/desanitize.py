@@ -29,9 +29,10 @@ Date: 2026-04-16
 
 import sys
 import pyodbc
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 from uuid import UUID
-from datetime import datetime
+from datetime import datetime, date
+from decimal import Decimal
 from collections import defaultdict
 
 from mapping import (
@@ -47,6 +48,76 @@ from desanitization.desanitization_config import (
     create_safe_config,
     create_production_config
 )
+
+
+def convert_to_sql_type(value: str, sql_type: str) -> Any:
+    """
+    Convert decrypted string value back to proper Python type.
+    
+    This ensures type-safe restoration without relying on SQL Server's
+    implicit conversion. Handles dates, numbers, and other types.
+    
+    Args:
+        value: Decrypted string value
+        sql_type: SQL Server data type (e.g., 'DATE', 'INT', 'DECIMAL(10,2)')
+    
+    Returns:
+        Value converted to appropriate Python type
+    
+    Examples:
+        >>> convert_to_sql_type('1985-03-15', 'DATE')
+        datetime.date(1985, 3, 15)
+        
+        >>> convert_to_sql_type('42', 'INT')
+        42
+    """
+    if value is None:
+        return None
+    
+    # Extract base type (remove size/precision)
+    base_type = sql_type.split('(')[0].upper().strip()
+    
+    try:
+        # Date/Time types
+        if base_type == 'DATE':
+            return datetime.fromisoformat(value).date()
+        elif base_type in ('DATETIME', 'DATETIME2', 'SMALLDATETIME'):
+            return datetime.fromisoformat(value)
+        elif base_type == 'TIME':
+            return datetime.fromisoformat(f'1900-01-01T{value}').time()
+        
+        # Integer types
+        elif base_type in ('INT', 'INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT'):
+            return int(value)
+        
+        # Decimal/Numeric types
+        elif base_type in ('DECIMAL', 'NUMERIC', 'MONEY', 'SMALLMONEY'):
+            return Decimal(value)
+        
+        # Float types
+        elif base_type in ('FLOAT', 'REAL'):
+            return float(value)
+        
+        # Bit type (boolean)
+        elif base_type == 'BIT':
+            return 1 if value.lower() in ('true', '1', 'yes') else 0
+        
+        # String types - return as-is
+        elif base_type in ('VARCHAR', 'NVARCHAR', 'CHAR', 'NCHAR', 'TEXT', 'NTEXT'):
+            return value
+        
+        # Binary types
+        elif base_type in ('VARBINARY', 'BINARY'):
+            return value.encode('utf-8') if isinstance(value, str) else value
+        
+        # Default: return string (for unknown types)
+        else:
+            return value
+    
+    except (ValueError, AttributeError) as e:
+        # If conversion fails, return string (SQL Server will attempt implicit conversion)
+        print(f"      [WARN] Type conversion failed for {sql_type}: {e}. Using string value.")
+        return value
 
 
 class DesanitizationError(Exception):
@@ -348,7 +419,7 @@ class Desanitizer:
         for column, col_mappings in column_mappings.items():
             print(f"      Column: {column} ({len(col_mappings):,} values)...")
             
-            # Decrypt/decode original values
+            # Decrypt/decode original values and prepare mapping entries
             decrypted_mappings = []
             for mapping in col_mappings:
                 try:
@@ -359,16 +430,19 @@ class Desanitizer:
                         # Try decryption first if encryption manager available
                         if self.encryption_manager:
                             try:
-                                original_value = self.encryption_manager.decrypt(
+                                decrypted_str = self.encryption_manager.decrypt(
                                     mapping.original_value_encrypted
                                 )
                                 stats.encrypted_values_decrypted += 1
                             except DecryptionError:
                                 # Decryption failed - might be plaintext bytes
-                                original_value = mapping.original_value_encrypted.decode('utf-8')
+                                decrypted_str = mapping.original_value_encrypted.decode('utf-8')
                         else:
                             # No encryption manager - treat as plaintext bytes
-                            original_value = mapping.original_value_encrypted.decode('utf-8')
+                            decrypted_str = mapping.original_value_encrypted.decode('utf-8')
+                        
+                        # Convert string back to proper Python type based on SQL data type
+                        original_value = convert_to_sql_type(decrypted_str, mapping.data_type)
                     else:
                         # No encrypted value and not NULL - data corruption
                         raise DesanitizationError(
@@ -376,7 +450,13 @@ class Desanitizer:
                             "Data may be corrupted or sanitization didn't capture mappings properly."
                         )
                     
-                    decrypted_mappings.append((mapping.masked_value, original_value))
+                    # Store mapping with PK info
+                    decrypted_mappings.append({
+                        'masked_value': mapping.masked_value,
+                        'original_value': original_value,
+                        'pk_columns': mapping.primary_key_columns,
+                        'pk_values': mapping.primary_key_values
+                    })
                 
                 except (DecryptionError, UnicodeDecodeError) as dec_err:
                     raise DesanitizationError(
@@ -396,13 +476,101 @@ class Desanitizer:
         conn,
         table_name: str,
         column: str,
-        mappings: List[Tuple[str, Optional[str]]],
+        mappings: List[Dict],
         config: DesanitizationConfig
     ) -> int:
-        """Restore a column using batch UPDATE."""
+        """
+        Restore a column using PK-based batch UPDATE.
+        
+        Args:
+            conn: Database connection
+            table_name: Fully qualified table name (schema.table)
+            column: Column name
+            mappings: List of dicts with keys: masked_value, original_value, pk_columns, pk_values
+            config: Desanitization configuration
+        
+        Returns:
+            Number of rows restored
+        """
         if not mappings or config.dry_run:
             return len(mappings)
         
+        from mapping import pk_values_from_json, PrimaryKeyInfo
+        
+        # Check if PK info is available
+        has_pk_info = mappings[0].get('pk_columns') and mappings[0].get('pk_values')
+        
+        if has_pk_info:
+            # PK-based restoration (accurate row matching)
+            return self._restore_with_pk_matching(conn, table_name, column, mappings)
+        else:
+            # Fallback to value-based restoration (may have row mismatches)
+            print(f"         [WARN] No PK info available - using value-based matching (may cause row mismatches)")
+            return self._restore_with_value_matching(conn, table_name, column, mappings)
+    
+    def _restore_with_pk_matching(
+        self,
+        conn,
+        table_name: str,
+        column: str,
+        mappings: List[Dict]
+    ) -> int:
+        """Restore using primary key matching for accurate row updates."""
+        from mapping import pk_values_from_json, PrimaryKeyInfo
+        
+        cursor = conn.cursor()
+        rows_updated = 0
+        
+        try:
+            # Parse PK columns from first mapping (all should have same PK structure)
+            pk_columns_json = mappings[0]['pk_columns']
+            pk_columns = PrimaryKeyInfo.from_json(pk_columns_json)
+            
+            # Build UPDATE statement with PK matching
+            pk_where_parts = [f"t.[{pk_col}] = ?" for pk_col in pk_columns]
+            pk_where_clause = " AND ".join(pk_where_parts)
+            
+            update_query = f"""
+                UPDATE t
+                SET t.[{column}] = ?
+                FROM {table_name} t
+                WHERE {pk_where_clause};
+            """
+            
+            # Execute updates in batch
+            batch_params = []
+            for mapping in mappings:
+                pk_values = pk_values_from_json(mapping['pk_values'])
+                original_value = mapping['original_value']
+                
+                # Parameters: original_value, pk_value1, pk_value2, ...
+                params = [original_value] + pk_values
+                batch_params.append(params)
+            
+            # Execute batch
+            cursor.executemany(update_query, batch_params)
+            rows_updated = cursor.rowcount
+            
+            cursor.close()
+            
+            # Handle -1 rowcount
+            if rows_updated == -1:
+                rows_updated = len(mappings)
+            
+            return rows_updated
+        
+        except Exception as e:
+            conn.rollback()
+            raise DesanitizationError(f"Failed to restore {table_name}.{column} with PK matching: {str(e)}")
+    
+    def _restore_with_value_matching(
+        self,
+        conn,
+        table_name: str,
+        column: str,
+        mappings: List[Dict]
+    ) -> int:
+        """Fallback: Restore using value-based matching (old behavior)."""
         cursor = conn.cursor()
         
         try:
@@ -419,7 +587,8 @@ class Desanitizer:
             
             # Insert mappings
             insert_query = "INSERT INTO #temp_restore (masked_value, original_value) VALUES (?, ?)"
-            cursor.executemany(insert_query, mappings)
+            batch_data = [(m['masked_value'], m['original_value']) for m in mappings]
+            cursor.executemany(insert_query, batch_data)
             conn.commit()
             
             # Single UPDATE with JOIN

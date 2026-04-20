@@ -216,7 +216,7 @@ class RestoreStats:
         return (
             self.tables_failed == 0
             and not self.has_errors
-            and (not self.verification_passed or self.total_tables == 0)
+            and (self.verification_passed or self.total_tables == 0)
         )
 
 
