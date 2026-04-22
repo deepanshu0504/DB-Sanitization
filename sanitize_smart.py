@@ -125,6 +125,7 @@ class ColumnInfo:
     max_length: Optional[int]
     nullable: bool
     column_name: Optional[str] = None  # For component type detection
+    is_computed: bool = False  # True if computed column (cannot be modified)
 
 
 class SmartMaskerEngine:
@@ -850,7 +851,8 @@ def get_column_metadata(conn, schema: str, table: str, column: str) -> ColumnInf
     SELECT 
         c.DATA_TYPE,
         c.CHARACTER_MAXIMUM_LENGTH,
-        c.IS_NULLABLE
+        c.IS_NULLABLE,
+        COLUMNPROPERTY(OBJECT_ID(c.TABLE_SCHEMA + '.' + c.TABLE_NAME), c.COLUMN_NAME, 'IsComputed') AS is_computed
     FROM INFORMATION_SCHEMA.COLUMNS c
     WHERE c.TABLE_SCHEMA = ?
       AND c.TABLE_NAME = ?
@@ -867,17 +869,20 @@ def get_column_metadata(conn, schema: str, table: str, column: str) -> ColumnInf
             data_type="NVARCHAR",
             max_length=255,
             nullable=True,
-            column_name=column
+            column_name=column,
+            is_computed=False
         )
     
     data_type = row[0]
     max_length = row[1]
     is_nullable = (row[2] == 'YES')
+    is_computed = (row[3] == 1)
     
     return ColumnInfo(
         data_type=data_type,
         max_length=max_length,
         nullable=is_nullable,
+        is_computed=is_computed,
         column_name=column
     )
 
@@ -922,6 +927,11 @@ def sanitize_column(
         
         print(f"     Type: {pii_type}")
         print(f"     Column: {column_info.data_type}({column_info.max_length})")
+        
+        # Skip computed columns - they cannot be modified
+        if column_info.is_computed:
+            print(f"     [SKIP] Computed column - cannot be modified")
+            return 0
         
         # Detect primary key columns for row-specific restoration
         pk_info = None
@@ -1074,25 +1084,74 @@ def sanitize_column(
                 
                 # Fallback: Individual updates (slower but reliable)
                 cursor = conn.cursor()
-                update_query = f"""
-                    UPDATE {fully_qualified}
-                    SET [{column}] = ?
-                    WHERE [{column}] = ?
-                """
                 
-                total_updated = 0
-                for original_val, masked_val in updates:
-                    try:
-                        cursor.execute(update_query, (masked_val, original_val))
-                        if cursor.rowcount > 0:
-                            total_updated += cursor.rowcount
-                    except pyodbc.Error:
-                        continue  # Skip problematic rows
+                # Use PK-based updates if available, otherwise value-based
+                if pk_info and pk_info.pk_columns:
+                    # PK-based fallback (accurate row-level updates)
+                    pk_where = " AND ".join([f"[{pk_col}] = ?" for pk_col in pk_info.pk_columns])
+                    update_query = f"""
+                        UPDATE {fully_qualified}
+                        SET [{column}] = ?
+                        WHERE {pk_where}
+                    """
+                    
+                    total_updated = 0
+                    successful_mappings = []
+                    
+                    for idx, mapping_entry in enumerate(mapping_entries):
+                        try:
+                            from mapping import pk_values_from_json
+                            pk_values = pk_values_from_json(mapping_entry.primary_key_values)
+                            params = [mapping_entry.masked_value] + pk_values
+                            
+                            cursor.execute(update_query, params)
+                            if cursor.rowcount > 0:
+                                total_updated += cursor.rowcount
+                                successful_mappings.append(mapping_entry)
+                        except (pyodbc.Error, Exception):
+                            continue  # Skip problematic rows
+                else:
+                    # Value-based fallback (may update multiple rows per unique value)
+                    # Note: This path is less accurate when there are duplicate values
+                    update_query = f"""
+                        UPDATE {fully_qualified}
+                        SET [{column}] = ?
+                        WHERE [{column}] = ?
+                    """
+                    
+                    total_updated = 0
+                    seen_values = set()  # Track which unique values we've processed
+                    
+                    for original_val, masked_val in updates:
+                        # Skip duplicate values (already attempted this update)
+                        value_pair = (str(original_val), str(masked_val))
+                        if value_pair in seen_values:
+                            continue
+                        seen_values.add(value_pair)
+                        
+                        try:
+                            cursor.execute(update_query, (masked_val, original_val))
+                            if cursor.rowcount > 0:
+                                total_updated += cursor.rowcount
+                        except pyodbc.Error:
+                            continue  # Skip failed updates
+                    
+                    # Store all mapping entries since value-based UPDATEs affect all matching rows
+                    successful_mappings = mapping_entries if total_updated > 0 else []
                 
                 conn.commit()
                 cursor.close()
                 
-                print(f"     [OK] Updated {total_updated:,} rows (fallback method)")
+                # Store mappings after successful fallback update (if enabled)
+                if successful_mappings and mapping_manager and not dry_run:
+                    try:
+                        stats = mapping_manager.store_mappings(successful_mappings)
+                        print(f"     [OK] Updated {total_updated:,} rows (fallback method) | Stored {stats.total_mappings} mappings")
+                    except Exception as mapping_err:
+                        print(f"     [OK] Updated {total_updated:,} rows (fallback method) | [WARN] Mapping storage failed: {str(mapping_err)[:50]}")
+                else:
+                    print(f"     [OK] Updated {total_updated:,} rows (fallback method)")
+                
                 return total_updated
         else:
             print(f"     [OK] Would update {len(updates):,} rows (DRY-RUN)")
