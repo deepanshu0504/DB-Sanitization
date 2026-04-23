@@ -159,6 +159,8 @@ class MappingManager:
                             original_value_hash VARBINARY(32) NOT NULL,
                             original_value_encrypted VARBINARY(MAX),
                             masked_value NVARCHAR(MAX),
+                            primary_key_columns NVARCHAR(MAX),
+                            primary_key_values NVARCHAR(MAX),
                             data_type NVARCHAR(128) NOT NULL,
                             is_null BIT NOT NULL DEFAULT 0,
                             created_at DATETIME2(7) NOT NULL DEFAULT GETUTCDATE(),
@@ -231,6 +233,25 @@ class MappingManager:
                     table_name
                 )
                 INCLUDE (column_name, original_value_hash)
+            END
+        """)
+        
+        # Index 4: Primary key-based restoration queries
+        cursor.execute(f"""
+            IF NOT EXISTS (
+                SELECT 1 FROM sys.indexes 
+                WHERE object_id = OBJECT_ID('{full_table}') 
+                AND name = 'IX_{self.table_name}_pk_restore'
+            )
+            BEGIN
+                CREATE NONCLUSTERED INDEX IX_{self.table_name}_pk_restore
+                ON {full_table} (
+                    operation_id,
+                    schema_name,
+                    table_name,
+                    column_name
+                )
+                INCLUDE (primary_key_columns, primary_key_values, original_value_encrypted, masked_value, is_null)
             END
         """)
     
